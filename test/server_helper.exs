@@ -103,7 +103,7 @@ defmodule Aetherion.TestServer do
     length = String.to_integer(Map.get(headers, "content-length", "0"))
 
     if byte_size(rest) >= length do
-      <<body::binary-size(length), remaining::binary>> = rest
+      <<body::binary-size(^length), remaining::binary>> = rest
       [path | query] = String.split(target, "?", parts: 2)
 
       request = %{
