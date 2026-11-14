@@ -1,0 +1,114 @@
+// Resource and energy monitoring: 50 virtual users, all starting at once,
+// search for a random product term for 5 minutes with 1 second think time.
+// The search API runs in a virtual machine on one physical server. While
+// the load runs, the engine reads the CPU utilization of the virtual machine
+// from node_exporter every 5 seconds and the power of the physical server
+// from every MQTT message.
+//
+// Per request, the engine records status code, latency and outcome
+// (ok, failed, timeout, connectionError, checkFailed) on its own (C104,
+// C105, C130). CPU and power need no statements either: the targets list
+// them in metrics, and monitoring says how they are read (C158, C159, C163).
+//
+// At the end of the run the engine prints, and the summary file holds,
+// latency p50 p95 p99, the error rate, the CPU mean and max of the virtual
+// machine, power mean and peak and the total energy with its source of the
+// physical server (C121, C131, C135, C160, C161). The power covers the
+// whole physical server, so it includes every other virtual machine on it.
+// Every part of the test runs inside PerfLang: the
+// engine reads node_exporter and the MQTT broker itself, with no
+// Prometheus server and no script after the run.
+//
+// The test only reports on the server. Requests use check instead of
+// assert, so a failed request counts in the error rate but never fails the
+// Test (C129). Verify only makes sure the measurement is valid: the Test
+// fails when no power or no CPU data arrived during the load (C117, C164).
+// The run exits with 0, with 1 when data is missing, and with 2 when it
+// cannot run or is aborted (C132).
+
+TestSuite ResourceAndEnergyMonitoring {
+  Config {
+    sut {
+      // The virtual machine of the search API: cpu from node_exporter on
+      // the host of baseUrl (C156, C159).
+      searchApi { baseUrl = "http://192.168.178.71:8080"; metrics = [cpu]; }
+
+      // The physical server that hosts the virtual machine. A measured
+      // machine is a target of its own (C156); its only metric comes over
+      // MQTT, so it needs no baseUrl or host (C163). Energy covers this
+      // target only, and the load generator does not count (C161).
+      physicalServer {
+        metrics = [power];
+        topics { power = "power/app-server"; }
+      }
+    }
+
+    monitoring {
+      // node_exporter: http://192.168.178.71:9100/metrics in the Prometheus
+      // text format, read every 5 seconds. cpu is the busy share of the
+      // change in node_cpu_seconds_total between two readings, over all
+      // cores: 100 * (1 - change of idle / change of all modes) (C158, C174).
+      interval = 5s;
+      port     = 9100;
+      format   = prometheus;
+
+      // Every message is a sample, timed by its arrival; power is read from
+      // the field watts of {"ts": ..., "watts": ...} (C163). energy.total()
+      // integrates the samples during the load with the trapezoid rule and
+      // subtracts no baseline (C161, C162).
+      mqtt {
+        broker = "mqtt://192.168.178.175:1883";
+        fields { power = "watts"; }
+      }
+    }
+
+    output {
+      // One JSON line per request (C120, C122).
+      requests {
+        file   = "results/resource_and_energy_monitoring_requests.jsonl";
+        fields = [time, url, status, latency, outcome];
+      }
+
+      // Every CPU and power sample with its time (C173).
+      samples { file = "results/resource_and_energy_monitoring_samples.jsonl"; }
+
+      summary = "results/resource_and_energy_monitoring_summary.json";   // metrics, CPU, power and energy (C121)
+    }
+  }
+
+  Test SearchProducts {
+    Load {
+      thinkTime 1s;                 // each user waits after every response (C16)
+      requestTimeout 5s;            // a timeout counts as a failure (C96, C105)
+
+      // All 50 users start at once (C128) and run for 5 minutes.
+      stages [ 50vu for 5m ]
+    }
+
+    Actions {
+      // One term per iteration, picked at random (C134).
+      let term = ["laptop", "phone", "camera", "headphones", "monitor"].random();
+
+      // query adds ?q=<term> (C115). The query is not part of the endpoint,
+      // so every term counts in one endpoint, /api/search (C135).
+      let response = sut.searchApi.http.get("/api/search", { "query": { "q": term } });
+
+      // Only 200 is a success. Timeouts and connection errors have
+      // status 0 (C110), so they fail this check too, and keep their own
+      // outcome; an ok request with another status becomes checkFailed.
+      // Every failure counts in errors.rate() (C107, C130), but a failed
+      // check never fails the Test (C129).
+      check response.status == 200;
+    }
+
+    // Was the measurement valid? A metric with no sample during the load has
+    // no value, so its assert fails and the report names the target and its
+    // sample count (C141, C164). These asserts are the only pass criteria;
+    // they do not judge the server, and failed requests still count only in
+    // the error rate (C117, C129).
+    Verify {
+      assert sut.physicalServer.power.mean() > 0W;   // MQTT power data arrived
+      assert sut.searchApi.cpu.mean()        >= 0%;  // node_exporter CPU data arrived
+    }
+  }
+}

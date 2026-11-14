@@ -1,0 +1,50 @@
+// Performance assertions: 50 virtual users, all starting at once, send GET
+// requests for 3 minutes with 1 second think time. The test passes only if,
+// over the full run, the 95th-percentile latency is below 300 ms and the
+// error rate is below 1%.
+//
+// At the end of the run the engine prints every Verify assert with its
+// measured value and whether it passed, and the result of the Test (C131).
+// The summary file holds the same (C121). The run exits with 0 when the
+// Test passes, 1 when it fails and 2 when it cannot run (C132).
+
+TestSuite PerformanceAssertions {
+  Config {
+    sut {
+      productApi { baseUrl = "http://192.168.178.71:8080"; }
+    }
+
+    output {
+      summary = "results/performance_assertions_summary.json";   // criteria, measured values, result (C121)
+    }
+  }
+
+  Test GetProducts {
+    Load {
+      thinkTime 1s;                 // each user waits after every response (C16)
+      requestTimeout 5s;            // a timeout counts as a failure (C105)
+
+      // A hold stage with no ramp before it: all 50 users start at once
+      // and keep sending requests for 3 minutes (C128).
+      stages [ 50vu for 3m ]
+    }
+
+    Actions {
+      let response = sut.productApi.http.get("/api/products");
+
+      // Only 200 is a success. A non-200 response ends this iteration and
+      // is recorded as assertFailed, so it counts in errors.rate(), but it
+      // does not fail the Test by itself: Verify decides (C116, C117, C125).
+      // Timeouts and connection errors have status 0 (C110), so they fail
+      // this assert too and keep their own outcome (C105).
+      assert response.status == 200;
+    }
+
+    // Pass criteria over the full run; no warmup, so every request counts
+    // (C104). A failed assert here fails the Test (C117).
+    Verify {
+      assert latency.p95() < 300ms;
+      assert errors.rate() < 1%;
+    }
+  }
+}

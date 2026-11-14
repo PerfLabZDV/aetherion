@@ -1,0 +1,1529 @@
+(* PerfLang grammar, ISO/IEC 14977 EBNF notation                          *)
+(* Version 1.35: version 1.34 with runs. (1.34 toString, 1.33 request     *)
+(* metrics per target, 1.32 iteration counts per virtual user, 1.31 rules *)
+(* for the execution engine, 1.30 metrics over MQTT, 1.29 monitoring and  *)
+(* machine metrics, 1.28 host and external configuration files, 1.27      *)
+(* rules for the Semantic Analyzer, 1.26 default for Tests without        *)
+(* criteria, 1.25 asserts in Actions not failing a Test, 1.24 metrics per *)
+(* endpoint, 1.23 random method, 1.22 sleep built-in, 1.21 think time     *)
+(* after every response, 1.20 criteria report and exit codes, 1.19 check  *)
+(* statement, 1.18 now stages, 1.17 Load placement style, 1.16 failed     *)
+(* asserts in errors, 1.15 no successStatus, 1.14 stages default, 1.13    *)
+(* thinkTime default, 1.12 request bodies, 1.11 requests fields, 1.10     *)
+(* result output, 1.9 failed asserts, 1.8 http calls, 1.7 optional        *)
+(* Verify, 1.6 stages in iterations, 1.5 metric recording, 1.4 stages by  *)
+(* count, 1.3 Config, 1.2 requestTimeout, 1.1 map and lambdas).           *)
+(* Every rule below was decided by Robin (C1-C180). Rules marked          *)
+(* "checked after parsing" are semantic checks a parser cannot express    *)
+(* in EBNF.                                                               *)
+(*                                                                        *)
+(* Decisions (Robin, 2026-09-28 to 2026-11-14):                           *)
+(*   C1  TestSuite, Test and every phase are delimited by braces { }.     *)
+(*   C2  Suites and tests carry a name.                                   *)
+(*   C3  Phases appear in the fixed order Setup, Actions, Verify, Cleanup.*)
+(*   C4  Setup, Verify and Cleanup are optional; Actions is required.     *)
+(*       A Test without Verify has no pass criteria (C117).               *)
+(*   C5  A file contains exactly one TestSuite.                           *)
+(*   C6  A TestSuite contains at least one Test.                          *)
+(*   C7  Names are plain identifiers; quoted strings are not allowed.     *)
+(*   C8  An identifier starts with a letter, then letters, digits or "_". *)
+(*   C9  A phase may be empty, e.g. Setup { }.                            *)
+(*   C10 Load is required. Either the TestSuite defines it (before the    *)
+(*       first Test), or, if the suite does not, every Test defines it as *)
+(*       its first block, before Setup. Which to prefer: C126.            *)
+(*   C11 The two options are exclusive: when the suite defines Load, no   *)
+(*       Test may define its own (no overrides).                          *)
+(*   C12 Load settings use keyword-value syntax without "=": warmup 2m;   *)
+(*   C13 Load settings: warmup, curves, stages, thinkTime,                *)
+(*       requestTimeout (C96), distribution, retry.                       *)
+(*   C14 warmup takes a value of type Time; Time units are ms, s, m, h.   *)
+(*   C15 A Time literal is a number directly followed by its unit, with   *)
+(*       no space: 500ms, 1.5s, 2m, 0.5h. (Decimals allowed, C57.)        *)
+(*   C16 thinkTime takes a value of type Time, like warmup: thinkTime 3s; *)
+(*       A virtual user waits that long after every response in Actions,  *)
+(*       before its next request, in the same iteration or the next       *)
+(*       (C103). The wait also follows a timeout or connection error      *)
+(*       (C110) and an iteration that ends early (C116), so failures do   *)
+(*       not become a tight loop. A retry waits by its delay instead,     *)
+(*       since it is the same request (C37, C107). Setup and Cleanup do   *)
+(*       not wait: they run outside the load (C125). The wait is not part *)
+(*       of latency. thinkTime is optional and defaults to 0ms (no wait   *)
+(*       between requests). The default is part of the language, not the  *)
+(*       engine's choice, so a suite waits the same on every engine.      *)
+(*   C17 curves is a block: curves { ... } (renamed from functions to     *)
+(*       avoid a clash with the suite-level Functions block).             *)
+(*   C18 Curve parameters are plain numbers (no type annotations).        *)
+(*   C19 stages is an ordered list written with brackets: stages [ ... ]  *)
+(*   C20 Stages are separated by commas.                                  *)
+(*   C21 The stages list holds at least one stage.                        *)
+(*   C22 No ";" after the closing bracket of stages.                      *)
+(*   C23 A trailing comma after the last stage is allowed.                *)
+(*   C24 A stage is: virtual users, "in" or "for", a Time, and optionally *)
+(*       a curve function (default linear). e.g. 100vu in 1m              *)
+(*       customLinear. Or virtual users and "now", e.g. 10vu now (C127).  *)
+(*   C25 A curve may be one from curves { } or a built-in (exp, sin, ...),*)
+(*       with arguments in parentheses: wave(3).                          *)
+(*   C26 "for" holds the user count constant, so it takes no curve;       *)
+(*       only "in" (ramp to the target) takes one.                        *)
+(*   C27 linear is a built-in like exp and sin. in and for are reserved   *)
+(*       words and cannot be used as curve or function names.             *)
+(*   C28 A curve's first parameter is always the time; a stage passes     *)
+(*       it automatically, so wave(3) fills the parameters after it.      *)
+(*   C29 A Time may combine units, largest first, each at most once:      *)
+(*       7m30s, 1h15m, 2s500ms. Enforced by the grammar.                  *)
+(*   C30 A curve function returns a shape: t runs from 0 to 1 over the    *)
+(*       stage, and the result (0 to 1) is stretched between the previous *)
+(*       and the target user count. Semantics only; grammar unaffected.   *)
+(*   C31 In a combined Time, each part after the first is capped: minutes *)
+(*       and seconds below 60, milliseconds below 1000. Checked after     *)
+(*       parsing, not by the grammar.                                     *)
+(*   C32 distribution is a block of keyword-value entries, like the Load  *)
+(*       settings: distribution { euCentral 70%; usEast 30%; } Tests use  *)
+(*       it through sut.any (C168).                                       *)
+(*   C33 Targets are names defined in Config (C100) or in an external     *)
+(*       configuration file (C157), so the grammar only sees identifiers; *)
+(*       they are resolved after parsing.                                 *)
+(*   C34 Percentage is a type of the DSL, written as a number with "%".   *)
+(*   C35 A Percentage has at most two decimal places: 70%, 33.3%, 33.33%. *)
+(*   C36 The distribution percentages must add up to exactly 100%,        *)
+(*       checked after parsing (compare in hundredths, not floating       *)
+(*       point, so 33.33% + 33.33% + 33.34% is exactly 100%).             *)
+(*   C37 retry is a block: retry { ... }                                  *)
+(*   C38 retry entries: attempts (a whole number), delay (a Time) and     *)
+(*       backoff (a strategy), as keyword-value lines ending in ";".      *)
+(*       attempts counts the first try, so attempts 3 is up to three      *)
+(*       requests; the default is 1, no retry. Timeouts, connection       *)
+(*       errors and responses of 500 or above are retried, other          *)
+(*       responses are not. delay is the first wait, default 0ms; backoff *)
+(*       default fixed.                                                   *)
+(*   C39 Conditions use the symbols && and || (not "and"/"or").           *)
+(*   C40 Energy, Power and Carbon are core types of the DSL, like Time:   *)
+(*       Energy in mJ, J, ..., Wh, ...; Power in W; Carbon in grams CO2.  *)
+(*   C41 Unit spellings: MJ, MWh, mW, kW, and CO2 as mgCO2e, gCO2e,       *)
+(*       kgCO2e (CO2-equivalent, the usual reporting unit). Units are     *)
+(*       case-sensitive: M is mega, m is milli.                           *)
+(*   C42 Energy, Power and Carbon values are numbers directly followed by *)
+(*       the unit, like Time: 10J, 0.5kWh, 2.5gCO2e.                      *)
+(*   C43 General style: statically typed, immutable by default, statements *)
+(*       end in ";", camelCase names, no null.                            *)
+(*   C44 let declares a variable with automatic type inference.           *)
+(*   C45 Example: let r = sut.euCentral.http.get("/products");            *)
+(*       sut and euCentral are defined in the external configuration.     *)
+(*   C46 PascalCase for block keywords (TestSuite, Test, Load, Actions,   *)
+(*       ...) and type names (Time, Energy); everything else, including   *)
+(*       let and the Load settings, is camelCase. Naming rules for user   *)
+(*       names are checked after parsing, not by the grammar.             *)
+(*   C47 A mutable variable is declared with let mut x = ...;             *)
+(*   C49 Setup, Actions, Verify and Cleanup all use the same statements.  *)
+(*   C50 Assertions: assert <expression>; e.g. assert response.status ==  *)
+(*       200; Soft assertions: check <expression>; (C129).                *)
+(*   C51 assert and check may appear in Setup, Actions, Verify and        *)
+(*       Cleanup.                                                         *)
+(*   C52 Curves are one line: name(params) = expression;                  *)
+(*       No statements, loops or variables, so every curve is a pure      *)
+(*       formula that can be evaluated at any point in time.              *)
+(*   C53 Full functions are declared in a Functions { } block in the      *)
+(*       TestSuite, before Load and the Tests, and can be used in every   *)
+(*       Test.                                                            *)
+(*   C54 Parameter and return types of full functions are required.       *)
+(*   C55 Full functions support if/else, loops, recursion and pattern     *)
+(*       matching.                                                        *)
+(*   C57 Plain numbers and values with units (Time, Energy, Power,        *)
+(*       Carbon) may have decimals: 0.5, 1.5s, 0.5kWh. Percentages keep   *)
+(*       at most two decimal places (C35).                                *)
+(*   C56 Curve built-ins: sin, cos, exp, log, sqrt, abs, min, max, linear *)
+(*       and constants pi, e. They are ordinary names resolved after      *)
+(*       parsing. Unknown names and recursion between curves (direct or   *)
+(*       indirect) are rejected after parsing.                            *)
+(*   C58 stopIf is a Load setting: stopIf <expression>; the expression    *)
+(*       must be of type Bool (checked after parsing). It is checked      *)
+(*       every second, over the run so far without warmup, the same data  *)
+(*       as Verify, and it ends only its own Test (C166).                 *)
+(*   C59 Metric groups and their measurements are part of the grammar.    *)
+(*       Both sides of a comparison must have the same type (Time vs      *)
+(*       Time, Energy vs Energy), checked after parsing.                  *)
+(*   C60 Metric groups and measurements (types in brackets):              *)
+(*       latency: p50 p90 p95 p99 mean min max [Time], percentile(n)      *)
+(*       throughput: perSecond [Number]                                   *)
+(*       errors: rate [Percentage], count timeouts connectionErrors       *)
+(*         assertFailures checkFailures [Number] (see C107, C125, C130)   *)
+(*       energy: total perRequest perUser [Energy]                        *)
+(*       power: mean peak [Power]                                         *)
+(*       carbon: total perRequest [Carbon]                                *)
+(*       asserts: failed [Number], rate [Percentage] (see C118)           *)
+(*       checks: failed [Number], rate [Percentage] (see C130)            *)
+(*       Group names are reserved words.                                  *)
+(*   C61 stopIf may appear several times in a Load block; the test stops  *)
+(*       as soon as any one of them is true. It is the only Load setting  *)
+(*       that may repeat (see C78).                                       *)
+(*   C62 Curve bodies, stopIf and statements share one expression         *)
+(*       grammar; types are checked after parsing, not by the grammar.    *)
+(*   C63 Statements: let / let mut, assignment to a mut variable, assert, *)
+(*       check, if, while, for, match, return, and bare calls. A bare     *)
+(*       statement must be a call; anything else (x + 1;) is rejected     *)
+(*       after parsing.                                                   *)
+(*   C64 String is a type: double-quoted, on one line, with escapes       *)
+(*       \" \\ \n \t.                                                     *)
+(*   C65 Raw strings """...""" may span lines and need no escapes; their  *)
+(*       content is kept exactly as written.                              *)
+(*   C66 Json is a core type of the DSL.                                  *)
+(*   C67 Json values are written as native literals inside expressions:   *)
+(*       { "key": value, ... } and [ value, ... ]. Keys are quoted        *)
+(*       strings, so any valid JSON can be pasted in; values may be any   *)
+(*       expression, so PerfLang variables can be used. Trailing commas   *)
+(*       are allowed, as in stages.                                       *)
+(*   C68 Indexing with [ ] reads JSON fields and array items and also     *)
+(*       works on lists: body["items"][0].                                *)
+(*   C69 null is allowed only as a JSON value (JSON needs it); PerfLang   *)
+(*       itself still has no null.                                        *)
+(*   C70 let has an optional type annotation: let x: Time = 5s;           *)
+(*   C71 Full functions use the keyword fn and end in a block:            *)
+(*       fn name(p: Type): ReturnType { ... }. A function without a       *)
+(*       result returns Unit (there is no null or void).                  *)
+(*   C72 Types may take type arguments: List<Response>.                   *)
+(*   C73 Control flow (if, while, for, match) is allowed in every phase,  *)
+(*       not only in functions. Loops: while <cond> { } and               *)
+(*       for x in <collection> { }; ranges come from a range(a, b)        *)
+(*       built-in instead of extra syntax.                                *)
+(*   C74 return is only allowed inside a function; recursion is allowed   *)
+(*       in full functions (the recursion ban in C56 is for curves only). *)
+(*   C75 match is an expression, like Haskell's case: arms are            *)
+(*       pattern [if guard] => value or block, separated by commas; the   *)
+(*       first match wins. Patterns are literals, a name that binds the   *)
+(*       value, or _ for anything.                                        *)
+(*   C76 A mut variable is changed with a plain assignment: x = x + 1;    *)
+(*       Only whole variables can be reassigned, not members (a.b = 1).   *)
+(*   C77 Reserved words, which cannot be used as names:                   *)
+(*       let mut fn if else while for in match return assert check        *)
+(*       map filter fold foldl foldr                                      *)
+(*       (and the symbols \ and -> for lambdas)                           *)
+(*       true false null                                                  *)
+(*       TestSuite Test Load Setup Actions Verify Cleanup Functions       *)
+(*       Config                                                           *)
+(*       latency throughput errors energy power carbon asserts checks     *)
+(*       http (C112)                                                      *)
+(*       All other keywords (Load, retry and Config settings,             *)
+(*       measurements, backoff strategies, units) only have meaning in    *)
+(*       one position and stay usable as names. Metric group names may    *)
+(*       follow "." as member names (C111), and so may http (C112).       *)
+(*   C78 Load settings may appear in any order. Each setting may appear   *)
+(*       at most once (except stopIf, C61); the grammar cannot enforce    *)
+(*       this for unordered settings, so a check after parsing rejects    *)
+(*       duplicates.                                                      *)
+(*   C79 Like the other blocks, curves { } takes no trailing ";" and      *)
+(*       may be empty.                                                    *)
+(*   C80 The first part of a Time is not capped, so single-unit values    *)
+(*       like 90s or 1500ms stay valid; 7m90s is rejected.                *)
+(*   C81 In a combined Time only the last part may have decimals:         *)
+(*       1m30.5s is valid, 1.5m30s is rejected after parsing.             *)
+(*   C82 No space between a Percentage and its "%": 70%, not 70 %.        *)
+(*   C83 distribution holds at least one entry and, like curves,          *)
+(*       takes no ";" after its closing "}".                              *)
+(*   C84 retry, like curves, takes no ";" after "}" and may be empty.     *)
+(*   C85 retry entries may appear in any order, each at most once, like   *)
+(*       the Load settings (C78).                                         *)
+(*   C86 backoff strategies are fixed, linear and exponential: fixed      *)
+(*       repeats delay, linear adds delay after each try, exponential     *)
+(*       doubles it. With delay 500ms the waits are 500ms, 500ms; 500ms,  *)
+(*       1s; or 500ms, 1s, 2s. They are fixed words, not curves.          *)
+(*   C87 Checked after parsing: each target appears once and each value   *)
+(*       is between 0% and 100%.                                          *)
+(*   C88 PerfLang has map, like Haskell, which needs functions as values  *)
+(*       (lambdas).                                                       *)
+(*   C89 Lambdas are written like Haskell: \x -> expression, or with      *)
+(*       several parameters \(a, b) -> expression. The body is a single   *)
+(*       expression.                                                      *)
+(*   C90 Lambda parameter types are inferred from context but may be      *)
+(*       written: \(r: Response) -> r.status. Function types use the     *)
+(*       existing generic syntax: Fn<Response, Int>.                      *)
+(*   C91 map, filter and fold are built-in methods on lists, so they      *)
+(*       chain: responses.filter(...).map(...). No grammar change needed. *)
+(*   C92 map, filter and fold are explicit grammar rules and reserved     *)
+(*       words; their argument shapes are fixed (fold takes a start value *)
+(*       and a function). Whether the receiver is a list is a type check  *)
+(*       after parsing.                                                   *)
+(*   C93 foldl and foldr exist as in Haskell; fold is the default and     *)
+(*       behaves like foldl.                                              *)
+(*   C94 Stage user counts carry the unit vu (virtual users): 50vu in    *)
+(*       30s exp. Whole numbers only, no space before vu.                 *)
+(*   C95 Virtual users are a core type, VirtualUsers, written with vu.    *)
+(*       They work anywhere a value goes: let peak = 300vu; and compare   *)
+(*       only with other VirtualUsers. Fractional users are not allowed.  *)
+(*   C96 requestTimeout is a Load setting: requestTimeout 5s; It takes a  *)
+(*       Time and, like the other settings, may appear anywhere in Load,  *)
+(*       at most once (C78). It is the longest a single request may take; *)
+(*       a request that takes longer is aborted, counts as an error       *)
+(*       (errors.rate, errors.count) and is retried as set in retry { }.  *)
+(*       It covers the whole request, connecting, sending and receiving.  *)
+(*       Optional: the default is 30s. The value must be greater than 0,  *)
+(*       checked after parsing.                                           *)
+(*   C97 Config is an optional block, the first in the TestSuite, before  *)
+(*       Functions, Load and the Tests. Like the other blocks it uses     *)
+(*       { }, takes no ";" after "}" and may be empty.                    *)
+(*   C98 Config holds sections: sut { ... }, the systems under test,      *)
+(*       output { ... }, where results are written (C119), monitoring {   *)
+(*       ... }, how machines are measured (C158), and runs { ... }, how   *)
+(*       often the suite runs (C178). Each section at most once, checked  *)
+(*       after parsing. All may be empty.                                 *)
+(*   C99 Each target in sut is a block of settings: euCentral { baseUrl = *)
+(*       "https://eu.api.examp.com"; } Unlike the Load settings (C12),    *)
+(*       target settings use "=". baseUrl takes a quoted string and is    *)
+(*       optional; each setting at most once per target. Checked after    *)
+(*       parsing: baseUrl is an http:// or https:// URL with a host and   *)
+(*       no trailing "/". host is the other setting (C156).               *)
+(*   C100 Targets defined in sut are used like the external ones (C33):   *)
+(*       sut.euCentral.http.get("/products"), distribution { euCentral    *)
+(*       70%; }. Each target name at most once in sut. Targets not in     *)
+(*       Config still come from the external configuration; names are     *)
+(*       resolved after parsing.                                          *)
+(*   C101 A stage length is a Time or an iteration count: 1vu for 10iter, *)
+(*       50vu in 500iter exp. Both "in" and "for" take either, and one    *)
+(*       stages list may mix them. For a ramp, the curve's t runs from 0  *)
+(*       to 1 over the count instead of the Time (C30). A count per       *)
+(*       virtual user, 1iter/vu, is for "for" only (C175).                *)
+(*   C102 An iteration count is a whole number directly followed by iter, *)
+(*       no space: 10iter. It is only a stage length, not a value type    *)
+(*       like VirtualUsers (C95): let n = 10iter; is rejected. It must be *)
+(*       greater than 0, checked after parsing.                           *)
+(*   C103 One iteration is one complete pass through the Actions block by *)
+(*        one virtual user, however many requests or retries it makes. A  *)
+(*        stage with a count starts exactly that many iterations in       *)
+(*        total, across all virtual users, and ends when they have        *)
+(*        finished. The users share the count: a fast user may run more   *)
+(*        iterations than a slow one, and a user may run none. For a      *)
+(*        count per user, use iter/vu (C175).                             *)
+(*   C104 Metrics are recorded by the execution engine, not by            *)
+(*        statements: every HTTP request attempt is recorded with its     *)
+(*        target, status, latency and outcome. The metrics (C60) read     *)
+(*        these records; Verify sees the totals after the run. Metrics    *)
+(*        describe the load, so they count Actions only: requests in      *)
+(*        Setup, Verify and Cleanup are left out of every metric, and so  *)
+(*        are requests during warmup. The requests file still holds them  *)
+(*        (C120).                                                         *)
+(*   C105 Outcomes: ok, failed (a response with a status of 400 or above, *)
+(*       C106), timeout (no response within requestTimeout, C96),         *)
+(*       connectionError, assertFailed (an ok request whose iteration     *)
+(*       then failed an assert, C125) and checkFailed (the same for a     *)
+(*       failed check, C130). Only ok is a success.                       *)
+(*   C106 A response with a status below 400 is a success. The rule is    *)
+(*       fixed by the language; there is no setting to change it          *)
+(*       (successStatus was removed in 1.15). To require one status,      *)
+(*       assert on it: assert response.status == 200; (C110, C116).       *)
+(*   C107 errors.rate() is failed requests (every outcome except ok) over *)
+(*       all requests, counted in HTTP requests, not iterations (C103). A *)
+(*       retried request counts once, with the outcome of its last        *)
+(*       attempt (C38). errors.count() counts the same failed requests;   *)
+(*       errors.timeouts(), errors.connectionErrors(),                    *)
+(*       errors.assertFailures() and errors.checkFailures() count those   *)
+(*       whose last attempt ended as timeout, connectionError,            *)
+(*       assertFailed or checkFailed (C125, C130).                        *)
+(*   C108 Latency metrics use only requests that got a response (ok,      *)
+(*       failed, assertFailed or checkFailed); timeouts and connection    *)
+(*       errors are left out, so they do not show up as fake latencies at *)
+(*       requestTimeout.                                                  *)
+(*   C109 CPU utilisation is read through the targets, as Percentage:     *)
+(*        sut.euCentral.cpu.mean() and .max() for one target,             *)
+(*        sut.cpu.mean() and .max() over all samples of all targets, and  *)
+(*        loadGenerator.cpu.mean() and .max() for the machine generating  *)
+(*        the load. This is plain member access: the grammar is           *)
+(*        unchanged, cpu stays usable as a name, and it is resolved after *)
+(*        parsing. A Config target may not be named cpu, mem, disk, gpu   *)
+(*        or power (checked after parsing). A target is read at its host  *)
+(*        (C156) and must list the metric (C159, C160).                   *)
+(*   C110 An http call that times out or cannot connect still returns a   *)
+(*        Response and the pass goes on. A Response has these members:    *)
+(*        status (Int), 0 when no response arrived; outcome (String),     *)
+(*        "ok", "failed", "timeout" or "connectionError"; latency (Time); *)
+(*        body (Json), the parsed response body, or JSON null when no     *)
+(*        response arrived or the body is not JSON; headers (Json), an    *)
+(*        object of the response headers with lower-case names. Any other *)
+(*        member is rejected after parsing.                               *)
+(*   C111 The metric group names (latency throughput errors energy power  *)
+(*       carbon asserts checks) may be used as member names after ".", so *)
+(*       a Response can have a latency field: response.latency.           *)
+(*       Everywhere else they stay reserved (C77): let latency = 1; is    *)
+(*       rejected, and latency.p95() at the start of an expression is     *)
+(*       still a metric.                                                  *)
+(*   C112 http is the built-in HTTP client and a reserved word (C77). It  *)
+(*        is called as sut.<target>.http.<method>(...), on any Target     *)
+(*        value as region.http.<method>(...), or without a target as      *)
+(*        http.<method>(...). Methods: get head delete post put patch.    *)
+(*        After "." http is a member name; any other use of http that is  *)
+(*        not http.<method>(...) is an error. Checked after parsing: the  *)
+(*        method, and that a standalone http is called. Targets are not   *)
+(*        checked against Config: they can come from external             *)
+(*        configuration (C45).                                            *)
+(*   C113 Arguments: get, head and delete take (url [, options]); post,   *)
+(*        put and patch take (url [, body [, options]]). The body is a    *)
+(*        JSON value or a string (C123). There is no null outside JSON    *)
+(*        (C69), so options without a body use the empty string, which    *)
+(*        sends no body: sut.a.http.post("/x", "", { ... }). Every call   *)
+(*        returns a Response (C110) and is recorded (C104). The argument  *)
+(*        count is checked after parsing.                                 *)
+(*   C114 With a target, the url is a path starting with "/", appended to *)
+(*        the target's baseUrl. Without a target it is a full http:// or  *)
+(*        https:// URL with a host:                                       *)
+(*        http.get("http://192.168.178.71:8080/api/health")               *)
+(*        Checked after parsing when the url is a string literal.         *)
+(*   C115 options is a JSON object with the optional keys "headers" and   *)
+(*        "query", each at most once and each a JSON object:              *)
+(*        { "headers": { "Accept": "application/json" },                  *)
+(*          "query": { "page": 2 } }                                      *)
+(*        query adds URL query parameters. Checked after parsing when     *)
+(*        written as literals.                                            *)
+(*   C116 A failed assert never stops the run: only stopIf (C58) and the  *)
+(*        end of the stages do, and assert has no option to. What it      *)
+(*        stops depends on the phase; C117 says when it fails the Test:   *)
+(*        Setup: the code after it in Setup does not run, and Actions     *)
+(*          and Verify are skipped, so no load is generated. Cleanup      *)
+(*          still runs.                                                   *)
+(*        Actions: the code after it in this iteration does not run. The  *)
+(*          iteration ends and the virtual user starts its next one       *)
+(*          (C103); the other virtual users go on unaffected.             *)
+(*        Verify: nothing is stopped. The code after it runs, so every    *)
+(*          assert and check is evaluated and every failure reported      *)
+(*          (C121, C131).                                                 *)
+(*        Cleanup: nothing is stopped. The code after it runs, and the    *)
+(*          failure is reported.                                          *)
+(*        An assert in a function behaves as in the phase that called it: *)
+(*          in Setup and Actions the rest of the function is skipped      *)
+(*          too; in Verify and Cleanup the function goes on.              *)
+(*   C117 A failed assert in Setup, Verify or Cleanup fails the Test. In  *)
+(*        Actions, failures are expected under load, so Actions records   *)
+(*        them and Verify decides: with at least one assert evaluated in  *)
+(*        Verify, a failed assert in Actions does not fail the Test. It   *)
+(*        counts in the metrics (C118, C125), so a criterion sees it:     *)
+(*        assert errors.rate() < 2%; A Test without criteria (no Verify,  *)
+(*        or a Verify that evaluates no assert) fails if any assert       *)
+(*        failed in Actions. A Test with criteria that also allows no     *)
+(*        failed assert says so: assert asserts.failed() == 0; To stop    *)
+(*        early on too many failures, use the metrics: stopIf             *)
+(*        asserts.rate() > 1%; A failed check never fails a Test (C129).  *)
+(*   C118 Failed asserts are recorded by the engine as their own metric:  *)
+(*        asserts.failed() is the number of failed asserts [Number],      *)
+(*        asserts.rate() failed over evaluated asserts [Percentage],      *)
+(*        counting every phase. A failed assert in Actions also marks a   *)
+(*        request, so the errors metrics count it too (C107, C125).       *)
+(*        Asserts during warmup are evaluated but left out of the metrics *)
+(*        and of C117 (C104).                                             *)
+(*   C119 output is a Config section that says where the engine writes    *)
+(*        the results it records (C104, C118): output { requests { file = *)
+(*        "results/requests.jsonl"; } summary = "results/summary.json"; } *)
+(*        Both are optional, each at most once, checked after parsing.    *)
+(*        Settings use "=" like baseUrl (C99). Without output, or for a   *)
+(*        part left out, the engine writes nothing. A relative path       *)
+(*        resolves from the working directory, and folders are created.   *)
+(*        If a file exists, the run adds a timestamp to the name of its   *)
+(*        new file, so no measurement is overwritten.                     *)
+(*   C120 The requests file has one JSON object per line (JSON Lines,     *)
+(*        .jsonl, checked after parsing) for every request attempt in     *)
+(*        every phase, with no sampling. The fields are fixed by the      *)
+(*        language: time (ISO 8601), run (C178), test, phase (Setup,      *)
+(*        Actions, Verify or Cleanup), virtualUser, iteration, target,    *)
+(*        method, url, status, latency (milliseconds, a number), outcome  *)
+(*        (C105) and attempt (retries, C38). Records outside Actions have *)
+(*        no virtualUser or iteration. Warmup requests are not written,   *)
+(*        unless includeWarmup is set (C122); then every record also has  *)
+(*        warmup (true/false).                                            *)
+(*   C121 summary is a .json file (checked after parsing) written at the  *)
+(*        end of the run: every metric (C60, C109); the request metrics   *)
+(*        per endpoint (C135) and per target (C176); every assert and     *)
+(*        check in Verify, passed or failed, with its source text, its    *)
+(*        position in the file, the measured value of each metric (C60)   *)
+(*        and CPU reading (C109) in its expression, and whether it        *)
+(*        passed; each failed assert and failed check from the other      *)
+(*        phases with its position (C118, C130); the energy of each       *)
+(*        target with its source (C161); the seed (C165); and the result  *)
+(*        of each Test (C117). With runs (C178) it holds all of this for  *)
+(*        every run, and each Test across the counted runs with its       *)
+(*        statistics (C180). Its layout is in the README, with a version  *)
+(*        field. The console report shows the same (C131).                *)
+(*   C122 requests is a block of settings, each at most once:             *)
+(*        requests {                                                      *)
+(*          file          = "results/requests.jsonl";                     *)
+(*          fields        = [time, status, latency, outcome];             *)
+(*          includeWarmup = true;                                         *)
+(*        }                                                               *)
+(*        file is required. fields is optional and picks the fields of    *)
+(*        C120 to write, in that order; without it, all are written. It   *)
+(*        needs at least one field, each once; warmup is not a field.     *)
+(*        includeWarmup is optional, default false. Checked after         *)
+(*        parsing. fields only changes the file, never the metrics or     *)
+(*        the summary.                                                    *)
+(*   C123 The body of post, put and patch (C113) is a JSON value or a     *)
+(*        string; its type, not how it is written, decides how it is      *)
+(*        sent, so a variable holding JSON counts as JSON:                *)
+(*        JSON object, array, number or Bool: serialized as JSON, with    *)
+(*          Content-Type: application/json                                *)
+(*        a non-empty string, raw strings included: sent as written, with *)
+(*          Content-Type: text/plain; charset=utf-8                       *)
+(*        the empty string "": no body and no Content-Type (C113)         *)
+(*        A Content-Type in the headers option (C115) replaces the        *)
+(*        default; header names are compared ignoring case. No Accept     *)
+(*        header is added. A string holding JSON, e.g. """{"id": 42}""",  *)
+(*        is still text/plain unless the header says otherwise. A unit    *)
+(*        literal (5s, 10J, 50%, ...) is not a body; checked after        *)
+(*        parsing.                                                        *)
+(*   C124 stages is optional. A Load without stages runs exactly as       *)
+(*        stages [ 1vu for 1iter ]: one virtual user, one iteration, e.g. *)
+(*        for a smoke test with Load { }. warmup and distribution need    *)
+(*        stages, checked after parsing: without stages the single        *)
+(*        iteration would fall inside the warmup and leave every metric   *)
+(*        empty, and one iteration has nothing to distribute.             *)
+(*   C125 A failed assert in Actions marks the last request the virtual   *)
+(*        user made in the same iteration, from Actions or from a         *)
+(*        function it called, by that request's last attempt (C38). If    *)
+(*        that request was ok, its outcome becomes assertFailed (C105),   *)
+(*        in the metrics and in the requests file (C120). A request that  *)
+(*        already failed, timed out or could not connect keeps its        *)
+(*        outcome and counts once. A failed assert before any request in  *)
+(*        its iteration counts only in asserts (C118). Asserts in Setup,  *)
+(*        Verify and Cleanup never mark a request: Setup and Cleanup run  *)
+(*        outside the load, and Verify checks the metrics themselves.     *)
+(*        response.outcome (C110) is the outcome when the call returned,  *)
+(*        so it is never assertFailed.                                    *)
+(*   C126 Style, not checked: a TestSuite with exactly one Test puts Load *)
+(*        inside that Test, as its first block (C10), so the Test reads   *)
+(*        as one unit: its load, then what each iteration does. Load at   *)
+(*        suite level is for several Tests that share one load profile,   *)
+(*        so no Test repeats it (C11).                                    *)
+(*   C127 A now stage changes the user count at once: 10vu now. It takes  *)
+(*        no time and no iterations, and no curve. It may appear anywhere *)
+(*        in stages: first, to start with users already running (10vu     *)
+(*        now, 100vu in 2m), or later, for a spike (50vu for 5m, 500vu    *)
+(*        now, 500vu for 1m). now is a contextual keyword (C77), so it    *)
+(*        stays usable as a name. Checked after parsing: a now stage may  *)
+(*        not be the last stage, since the run ends there and the change  *)
+(*        would never take effect.                                        *)
+(*   C128 A run starts with 0 virtual users. A ramp (in) goes from the    *)
+(*        count the previous stage left, 0 for the first stage, to its    *)
+(*        target (C30). A hold (for) runs at its count for its whole      *)
+(*        length; when the count before it differs, it changes at once,   *)
+(*        as with now (C127), so stages [ 50vu for 2m ] starts all 50     *)
+(*        users together.                                                 *)
+(*   C129 check <expression>; is a soft assert. Like assert, the          *)
+(*        expression must be a Bool (checked after parsing) and check may *)
+(*        appear in every phase (C51), also in functions. Unlike assert,  *)
+(*        a failed check stops nothing: the code after it runs and the    *)
+(*        iteration goes on (C116 does not apply), and it never fails the *)
+(*        Test (C117). A check counts; pass criteria decide: check        *)
+(*        response.status == 200; in Actions, assert errors.rate() < 1%;  *)
+(*        in Verify.                                                      *)
+(*   C130 Failed checks are recorded as their own metric: checks.failed() *)
+(*        is the number of failed checks [Number], checks.rate() failed   *)
+(*        over evaluated checks [Percentage], counting every phase;       *)
+(*        checks during warmup are left out (C104). A failed check in     *)
+(*        Actions marks the last request of its iteration as a failed     *)
+(*        assert does (C125), with outcome checkFailed, counted by        *)
+(*        errors.checkFailures(). A request that is not ok keeps its      *)
+(*        outcome, so several failed checks or asserts on one request     *)
+(*        count it once. response.outcome (C110) is never checkFailed.    *)
+(*   C131 At the end of the run the engine always prints a report to the  *)
+(*        console, whether or not output is set (C119): for each Test,    *)
+(*        every assert and check in Verify with its source text, the      *)
+(*        measured values and passed or failed, as in the summary (C121); *)
+(*        the request metrics per endpoint (C135); the readings and       *)
+(*        energy of each measured target (C160, C161) and the readings of *)
+(*        the load generator; the number of failed asserts and checks in  *)
+(*        the other phases; and the result of the Test (C117). With more  *)
+(*        than one run (C178) it shows each run, with the result and main *)
+(*        metrics of each Test and its failed Verify asserts and checks,  *)
+(*        then each Test across the counted runs with its statistics      *)
+(*        (C180). The layout of the console report is up to the engine;   *)
+(*        the summary file is the machine-readable form.                  *)
+(*   C132 A run exits with code 0 when every Test passed, in every        *)
+(*        counted run (C178), 1 when at least one Test failed (C117), and *)
+(*        2 when the run could not start or finish: the file does not     *)
+(*        parse or validate, the configuration is incomplete (e.g. a      *)
+(*        target that cannot be resolved, C33), or the engine fails, also *)
+(*        in one of several runs (C178). 2 takes precedence over 1, so CI *)
+(*        can tell a failed test from a broken run.                       *)
+(*   C133 sleep(t) pauses the virtual user that calls it for the Time t:  *)
+(*        sleep(2s); It is a built-in function, like range (C73), so the  *)
+(*        grammar only sees a bare call (C63), and it gives Unit (C71).   *)
+(*        It works in every phase (C49) and in functions. Use it for a    *)
+(*        pause at one step: thinkTime (C16) is the wait after every      *)
+(*        response, and the two add up, so with thinkTime 1s a sleep(2s)  *)
+(*        after a response makes 3s before the next request. A sleep is   *)
+(*        not a request, so it is not recorded (C104) and is not part of  *)
+(*        latency. Checked after parsing: one argument, not negative, a   *)
+(*        Time when written as a literal, and no fn named sleep.          *)
+(*   C134 random() is a built-in method on lists and JSON arrays (C91):   *)
+(*        body["products"].random()["id"]. It gives one item, every item  *)
+(*        equally likely, picked anew on each call. random(n) gives a     *)
+(*        list of n distinct items, n an Int: items.random(5). Both are   *)
+(*        plain member calls, so random stays usable as a name (C77).     *)
+(*        More than one argument is rejected after parsing. A JSON value  *)
+(*        that is not an array counts as an empty list. An empty list,    *)
+(*        fewer than n items or a negative n leave no value to give, so   *)
+(*        this is a failed assert with no value (C141).                   *)
+(*   C135 The summary (C121) and the console report (C131) also show the  *)
+(*        request metrics of each Test per endpoint. An endpoint is one   *)
+(*        target, http method and url path as sent, without the query     *)
+(*        (C115); a standalone http call (C112) has no target. A url      *)
+(*        built at run time gives one endpoint per distinct path. For     *)
+(*        each endpoint: the number of requests, latency p50 p90 p95 p99  *)
+(*        mean min max, throughput.perSecond and every errors measurement *)
+(*        (C60). The rules of the totals apply: only Actions requests     *)
+(*        outside warmup count (C104), a retried request counts once      *)
+(*        (C107), latency uses only requests that got a response (C108),  *)
+(*        and a failed assert or check counts at the endpoint of the      *)
+(*        request it marks (C125, C130). Energy, power, carbon, asserts,  *)
+(*        checks and CPU stay totals: they belong to no single request.   *)
+(*        This needs no setting and fields (C122) does not change it.     *)
+(*        Metrics in Verify and stopIf stay totals for the whole Test, so *)
+(*        a criterion cannot name an endpoint; in Verify it can name a    *)
+(*        target (C176).                                                  *)
+(*   C136 Scope. A variable declared in Setup is visible in Actions,      *)
+(*        Verify and Cleanup. A variable declared directly in Actions is  *)
+(*        also visible in Verify and Cleanup, where it holds the value    *)
+(*        from the last finished iteration that set it, of any virtual    *)
+(*        user; an iteration that ended early counts. Reading it when no  *)
+(*        iteration set it is a failed assert with no value (C141). A     *)
+(*        variable in a block (if, while, for, a match arm) ends with     *)
+(*        that block. Variables do not cross Tests.                       *)
+(*   C137 Setup runs once per Test, so a Setup variable is one value      *)
+(*        shared by all virtual users (C136). Assigning to it from        *)
+(*        Actions is rejected after parsing, since concurrent updates     *)
+(*        could be lost. To collect values, declare a list with let mut   *)
+(*        and append with add: cartIdList.add(cartId); add is a built-in  *)
+(*        method on mut lists that takes one argument and gives Unit.     *)
+(*        Each call is atomic, so no value is lost. It is not an          *)
+(*        assignment (C76): the variable keeps its list.                  *)
+(*   C138 The built-in types are Bool, String, Json (C66), Unit (C71),    *)
+(*        Int and Float (C139), Time, Energy, Power, Carbon (C40),        *)
+(*        Percentage (C34), VirtualUsers (C95), Response (C110), Target   *)
+(*        (C33), List<T> (C72) and Fn<...> (C90, C151). There are no      *)
+(*        user-defined types. Any other type name is rejected after       *)
+(*        parsing.                                                        *)
+(*   C139 Numbers are Int, whole numbers, or Float, with decimals (C57).  *)
+(*        A literal without decimals is an Int. An Int widens to Float    *)
+(*        wherever a Float is expected; a Float never narrows to Int. /   *)
+(*        and ^ give a Float. List indexes and range take Int. Number in  *)
+(*        C60 means either; it is not a type name.                        *)
+(*   C140 A [...] literal is a List<T> when its items have one type, and  *)
+(*        Json when they do not, or when it stands inside a JSON value or *)
+(*        is a request body. An annotation decides when one is given. An  *)
+(*        empty [] outside JSON takes T from its annotation or its first  *)
+(*        use, such as add (C137). A List inside a JSON value becomes a   *)
+(*        JSON array. for, map, filter, fold, random, length and contains *)
+(*        work on lists and on JSON arrays; a JSON array gives Json       *)
+(*        items. A value with no JSON form (a unit value, Response,       *)
+(*        Target, Fn or Unit) is rejected inside a JSON value or as a     *)
+(*        request body, checked after parsing (C123).                     *)
+(*   C141 A Json value converts implicitly wherever Int, Float, Bool,     *)
+(*        String or a List is expected, and compares with those types     *)
+(*        (C59). The check runs when the value is used. A wrong type, or  *)
+(*        a missing key or index (C68), is a failed assert with no value. *)
+(*        A failed assert with no value is a failed assert (C116, C117)   *)
+(*        after which the code in that phase does not run, in Verify and  *)
+(*        Cleanup too. JSON null (C69) converts to nothing.               *)
+(*   C142 Arithmetic on Time, Energy, Power and Carbon: + and - on two    *)
+(*        values of one type give that type; * and / with a number give   *)
+(*        that type (number * value too); / on two values of one type     *)
+(*        gives a Float. Energy / Time is Power, and Power * Time or Time *)
+(*        * Power is Energy. Anything else is rejected after parsing.     *)
+(*        Percentage and VirtualUsers have no arithmetic.                 *)
+(*   C143 Every target used, in sut.<target> or in distribution, must be  *)
+(*        in Config (C100) or in the external configuration file (C157).  *)
+(*        The file is given to the Semantic Analyzer, so an unknown       *)
+(*        target is reported before any load is sent, with exit code 2    *)
+(*        (C132).                                                         *)
+(*   C144 range(a, b) gives the Ints from a up to, not including, b:      *)
+(*        range(0, 10) runs ten times. The curve built-ins (C56) work in  *)
+(*        every expression, not only in curves. min and max take two      *)
+(*        numbers or two values of one unit type: min(pause, 5s).         *)
+(*   C145 More built-ins on lists and JSON arrays, next to map, filter    *)
+(*        and fold (C91), and plain member calls like random (C134):      *)
+(*        length() gives the number of items as an Int; contains(x) gives *)
+(*        a Bool. + on two Strings concatenates them: "/api/carts/" +     *)
+(*        cartId. A Json value converts only if it is a JSON string       *)
+(*        (C141).                                                         *)
+(*   C146 Metrics (C60) and CPU readings (C109) may be read in Verify,    *)
+(*        stopIf and Cleanup, and in functions called from there. They    *)
+(*        are rejected after parsing in Setup, where no load has run, and *)
+(*        in Actions, where a value would depend on timing.               *)
+(*   C147 ! is a unary operator on Bool, at the precedence of unary -: !a *)
+(*        == b is (!a) == b. Checked after parsing: the operand is a      *)
+(*        Bool, and the operand of unary - is a number or unit value.     *)
+(*   C148 A match used as a value gives one type in all arms and covers   *)
+(*        every case: it ends with _ or a binding without a guard, or has *)
+(*        both true and false. A match used as a statement has neither    *)
+(*        rule, since its arm values are dropped. Literal patterns have   *)
+(*        the type of the matched value. Checked after parsing.           *)
+(*   C149 Names, checked after parsing. An inner scope may shadow a name, *)
+(*        a built-in included. Declaring a name twice in one scope is an  *)
+(*        error. Test, fn and curve names are each unique in the suite;   *)
+(*        there is no overloading.                                        *)
+(*   C150 A fn can be used before its declaration, and mutual recursion   *)
+(*        is allowed (C74). A fn with a return type other than Unit       *)
+(*        returns on every path, checked after parsing. A fn sees its     *)
+(*        parameters, its own variables, built-ins and targets, not the   *)
+(*        variables of a phase.                                           *)
+(*   C151 Lambda parameter types come from context (C90). Without context *)
+(*        they must be written: let f = \x -> x; is rejected after        *)
+(*        parsing. In Fn<A, B, C> the last type is the return type and    *)
+(*        the others are parameters. A lambda reads the variables around  *)
+(*        it.                                                             *)
+(*   C152 stopIf and curve bodies make no http calls and read no          *)
+(*        variables, checked after parsing. A curve sees its parameters,  *)
+(*        other curves and built-ins (C56); a stopIf sees metrics, CPU    *)
+(*        readings and built-ins.                                         *)
+(*   C153 == and != compare two values of one type, by value: 1000ms ==   *)
+(*        1s. <, <=, > and >= take numbers, Time, Energy, Power, Carbon,  *)
+(*        Percentage and VirtualUsers. Conditions, && and || take Bool.   *)
+(*        Json converts by C141. Checked after parsing.                   *)
+(*   C154 percentile(n) takes n from 0 to 100, checked after parsing.     *)
+(*   C155 Cleanup runs once a Test has started, whatever happened before  *)
+(*        it: failed asserts (C116), stopIf (C58), or an interrupt        *)
+(*        (SIGINT or SIGTERM). After stopIf, Verify still runs. After an  *)
+(*        interrupt, Verify is skipped and the run exits with code 2      *)
+(*        (C132). A forced kill (SIGKILL) cannot be covered.              *)
+(*   C156 Targets are flat: there are no groups of targets, and a machine *)
+(*        that is measured is a target of its own. host is a target       *)
+(*        setting that names the machine of a target: euCentralDb { host  *)
+(*        = "10.0.0.20"; } It takes a quoted string, a host name or an    *)
+(*        address without scheme, path or spaces, checked after parsing.  *)
+(*        A target is measured at its host (C159); without one, at the    *)
+(*        host of baseUrl, so behind a load balancer the machines are     *)
+(*        measured through targets of their own. Checked after parsing,   *)
+(*        when written as sut.<target>: http calls and distribution need  *)
+(*        a target with a baseUrl. Through a Target value this is only    *)
+(*        known at run time: the http call gives outcome connectionError  *)
+(*        (C110).                                                         *)
+(*   C157 Targets can live outside the suite, so one test runs against    *)
+(*        several environments unchanged. An external configuration file  *)
+(*        holds exactly one Config block, in the syntax of C97, and for   *)
+(*        now only its sut and monitoring sections, so neither output nor *)
+(*        runs (C178), checked after parsing. Its name is free; .perfcfg  *)
+(*        is the convention. A target defined both in the file and in the *)
+(*        suite's Config is replaced as a whole by the definition in the  *)
+(*        file, and so is the monitoring section.                         *)
+(*   C158 monitoring is a Config section that says how machines are       *)
+(*        measured, with settings using = like baseUrl: interval, a Time  *)
+(*        above 0, default 1s; port, a whole number from 1 to 65535;      *)
+(*        path, starting with /, default "/metrics"; format, prometheus   *)
+(*        or json; fields, which maps a metric to where an agent reports  *)
+(*        it; carbonIntensity (C161); mqtt (C163). Each at most once,     *)
+(*        checked after parsing. With prometheus the engine computes cpu, *)
+(*        mem and disk from node_exporter, and fields names a metric that *)
+(*        is already a percentage or, for power, in watts: fields { gpu = *)
+(*        "DCGM_FI_DEV_GPU_UTIL"; } With json every agent metric needs a  *)
+(*        field, a dotted path. A target with metrics from an agent needs *)
+(*        a format, a port from monitoring or metricsPort, and any field  *)
+(*        its metrics need, checked after parsing.                        *)
+(*   C159 metrics is a target setting that lists what is measured on its  *)
+(*        machine: euCentralApp { host = "10.0.0.10"; metrics = [cpu,     *)
+(*        mem, disk, gpu, power]; } The names are known ones, at least    *)
+(*        one, each once, and a target with metrics from an agent needs a *)
+(*        host or a baseUrl, checked after parsing. A selector narrows a  *)
+(*        metric to some devices, and readings then cover only those:     *)
+(*        cpu[0, 1] by logical core, gpu[2] by device id, disk["nvme0n1"] *)
+(*        by device name. mem and power take no selector. A target        *)
+(*        without metrics is not measured. metricsPort is a target        *)
+(*        setting that replaces the port of monitoring; it needs metrics. *)
+(*        A machine with a second agent is a second target with the same  *)
+(*        host (C156): euCentralAppGpu { host = "10.0.0.10"; metricsPort  *)
+(*        = 9400; metrics = [gpu]; }                                      *)
+(*   C160 Every metric is read as cpu is in C109, with .mean() and        *)
+(*        .max(): sut.euCentralDb.mem.max() for one target and            *)
+(*        sut.mem.max() over all targets give a Percentage for cpu, mem,  *)
+(*        disk and gpu; power gives a Power:                              *)
+(*        sut.euCentralApp.power.mean(). Checked after parsing: written   *)
+(*        as sut.<target>, the target lists the metric; written as        *)
+(*        sut.<metric>, some target does. Through a Target value this is  *)
+(*        only known at run time: a failed assert with no value (C141).   *)
+(*        The load generator needs no agent or configuration: the engine  *)
+(*        reads loadGenerator.cpu and loadGenerator.mem on its own        *)
+(*        machine.                                                        *)
+(*   C161 energy.total() integrates the power samples over the window of  *)
+(*        C162, across every target that lists power; the load generator  *)
+(*        does not count. The report and the summary list the energy of   *)
+(*        each target with its source, mqtt or agent, since the two       *)
+(*        measure different things: the whole machine or part of it.      *)
+(*        power.mean() and power.peak() read the sum of those targets,    *)
+(*        and energy.perRequest() and energy.perUser() divide             *)
+(*        energy.total(), by Actions requests and by peak users.          *)
+(*        carbon.total() multiplies it by carbonIntensity, a setting of   *)
+(*        monitoring: carbonIntensity = 380gCO2e/kWh; This literal is     *)
+(*        only that setting, not a value type, and is above 0, checked    *)
+(*        after parsing. Reading energy, power or carbon with no target   *)
+(*        that lists power is rejected after parsing, and so is carbon    *)
+(*        without carbonIntensity.                                        *)
+(*   C162 Sampling starts with Setup and stops after Cleanup: once per    *)
+(*        interval (C158) from an agent, and on every message over MQTT   *)
+(*        (C163). Only samples in Actions outside warmup count in         *)
+(*        readings (C160) and energy (C161), as for request metrics       *)
+(*        (C104).                                                         *)
+(*   C163 mqtt is a block in monitoring for metrics that a device         *)
+(*        publishes itself: mqtt { broker =                               *)
+(*        "mqtt://broker.examp.com:1883"; qos = 1; fields { power =       *)
+(*        "ENERGY.Power"; } } broker is required, an mqtt:// URL with a   *)
+(*        host. qos is 0, 1 or 2, default 1. fields maps a metric to a    *)
+(*        dotted path in a JSON message, for every topic of that metric;  *)
+(*        a metric without a field arrives as a plain number. Each        *)
+(*        setting at most once, checked after parsing. topics is a target *)
+(*        setting that gives the topic of a metric: topics { power =      *)
+(*        "tele/app/SENSOR"; } A metric with a topic comes over MQTT and  *)
+(*        the others from the agent, so each metric has one source. A     *)
+(*        target whose metrics all have topics needs no host, port or     *)
+(*        format. Checked after parsing: each metric once and listed in   *)
+(*        metrics, a topic without the wildcards + and #, and mqtt in     *)
+(*        monitoring. Power arrives in watts. A sample has the arrival    *)
+(*        time of its message, so samples are irregular and energy (C161) *)
+(*        integrates over the time between them. Retained messages are    *)
+(*        ignored.                                                        *)
+(*   C164 A reading (C160) or an energy, power or carbon metric (C161)    *)
+(*        with no sample in the window of C162 for a target it covers is  *)
+(*        a failed assert with no value (C141), and the report names the  *)
+(*        target and its sample count (C131). This covers an MQTT device  *)
+(*        that publishes less often than the window is long.              *)
+(*   C165 A run is started with mix perflang run file.perf, with --config *)
+(*        for an external configuration file (C157), --seed for the seed  *)
+(*        and --runs for the number of runs (C178). Each start picks a    *)
+(*        seed, or takes the one given, for every random choice (C134);   *)
+(*        with several runs each run has a seed of its own, derived from  *)
+(*        it (C179). The report and the summary hold it, so the choices   *)
+(*        can be repeated. Timing still differs between runs.             *)
+(*   C166 The Tests of a suite run in order, one at a time, so their load *)
+(*        does not mix and their metrics stay separate. stopIf (C58) ends *)
+(*        only its Test, and the next one still runs.                     *)
+(*   C167 warmup is the first part of the stages, not time before them:   *)
+(*        warmup 2m with stages [ 50vu for 5m ] runs 5m and measures the  *)
+(*        last 3m. It must be shorter than the stages, checked after      *)
+(*        parsing when all their lengths are Times.                       *)
+(*   C168 sut.any is a Target that distribution (C32) picks once per      *)
+(*        iteration, by its percentages, so a virtual user stays on one   *)
+(*        target for a whole journey: let r =                             *)
+(*        sut.any.http.get("/api/products"); Calls that name a target are *)
+(*        not affected. Checked after parsing: sut.any is only used in    *)
+(*        Actions, or in a fn, with a distribution in Load, and no sut    *)
+(*        target is named any. Through a fn outside Actions this is only  *)
+(*        known at run time: a failed assert with no value (C141).        *)
+(*   C169 When the run ends or a ramp takes a virtual user away, its      *)
+(*        current request finishes and counts, and it starts no other. No *)
+(*        request is cut off, so no false timeouts appear at the end of a *)
+(*        run.                                                            *)
+(*   C170 The latency of a request runs from sending it, with any         *)
+(*        connection setup, to the last byte of the body. Each virtual    *)
+(*        user has its own keep-alive connection, so N users make N       *)
+(*        connections, and it reconnects when the system under test       *)
+(*        closes it. There are no cookies; a test sets a Cookie header. A *)
+(*        3xx is not followed: one call is one request (C106).            *)
+(*   C171 Setup and Cleanup run for at most 5m each; going over ends the  *)
+(*        run with exit code 2 (C132). Value errors with no other rule    *)
+(*        are a failed assert with no value (C141): a list index out of   *)
+(*        range, division by zero, log of 0 or less, and a negative       *)
+(*        sleep.                                                          *)
+(*   C172 Percentiles are exact, computed from every latency of the run.  *)
+(*        throughput.perSecond() divides the Actions requests by the      *)
+(*        Actions time outside warmup.                                    *)
+(*   C173 samples is a block in output that writes every sample (C162) to *)
+(*        a file, one JSON object per line: output { samples { file =     *)
+(*        "results/samples.jsonl"; } } The fields are fixed: time, run    *)
+(*        (C178), target, metric, value and phase. Optional, at most      *)
+(*        once, the file ends in .jsonl, checked after parsing.           *)
+(*   C174 Details of a run. In a stage, a built-in curve is scaled to the *)
+(*        shape of C30: exp gives (e^t - 1) / (e - 1), log gives log(1 +  *)
+(*        t(e - 1)), sin gives sin(t pi / 2), cos gives 1 - cos(t pi /    *)
+(*        2); any curve is held between 0 and 1. A ramp by iterations     *)
+(*        starts with at least one user. From node_exporter, cpu is the   *)
+(*        busy share of the change in node_cpu_seconds_total, mem the     *)
+(*        share of memory not available, and disk the share of time in    *)
+(*        node_disk_io_time_seconds_total. power.peak() is the highest    *)
+(*        sum at any sample. A latency metric with no response in the     *)
+(*        window is a failed assert with no value (C141).                 *)
+(*   C175 An iteration count per user is a stage length written with      *)
+(*        iter/vu: 20vu for 1iter/vu. Every virtual user in the stage     *)
+(*        runs exactly that many iterations, and the stage ends when all  *)
+(*        of them have finished, so 20vu for 1iter/vu runs 20 iterations, *)
+(*        one per user. It is one token, a whole number directly followed *)
+(*        by iter/vu with no spaces, like carbonIntensity (C161). Like    *)
+(*        iter it is only a stage length and greater than 0 (C102). Only  *)
+(*        a hold (for) takes it, checked after parsing: a ramp changes    *)
+(*        the user count while it runs, and its curve runs over a total   *)
+(*        (C101). The count is per stage, so a user that ran iterations   *)
+(*        in an earlier stage runs the full count again.                  *)
+(*   C176 Request metrics per target: sut.europe.latency.p95(),           *)
+(*        sut.europe.errors.rate() and sut.europe.throughput.perSecond(), *)
+(*        with every measurement of latency, throughput and errors (C60), *)
+(*        read only the Actions requests sent to that target, under the   *)
+(*        rules of the totals (C104, C107, C108, C135). A Target value    *)
+(*        works too: for region in [sut.europe, sut.unitedStates] {       *)
+(*        assert region.latency.p95() < 300ms; } A standalone http call   *)
+(*        (C112) belongs to no target. A target that got no counted       *)
+(*        request has no value, so a criterion on it is a failed assert   *)
+(*        with no value (C141): a region that got no load cannot pass.    *)
+(*        Checked after parsing: they are read where metrics are (C146)   *)
+(*        except stopIf, which reads live totals (C58); written as        *)
+(*        sut.<target>, the target has a baseUrl (C156); the measurement  *)
+(*        is one of C60; percentile takes a number from 0 to 100 (C154).  *)
+(*        sut.latency.p95() is rejected: over all targets it is           *)
+(*        latency.p95(). The summary (C121) gives each target its request *)
+(*        metrics, and the console report (C131) shows them when the Test *)
+(*        has more than one target with a baseUrl.                        *)
+(*   C177 toString() is a built-in method that gives the text of a value  *)
+(*        as a String, so a number can be joined to a String with +       *)
+(*        (C145): "username_" + userIndex.toString(). It is a plain       *)
+(*        member call like random (C134), so toString stays usable as a   *)
+(*        name (C77), and takes no arguments. Int gives its digits: "42". *)
+(*        Float gives the shortest text that reads back as the same       *)
+(*        Float, always with a decimal point: "2.0", "0.25", "1.0e21"; an *)
+(*        Int widened to a Float (C139) prints as a Float. Bool gives     *)
+(*        "true" or "false", and a String itself. Time, Energy, Power,    *)
+(*        Carbon, Percentage and VirtualUsers give the value in the base  *)
+(*        unit of the report (C131) with its unit, at most three decimals *)
+(*        and no ".0" on a whole value: 1.5s gives "1500ms", 1kWh         *)
+(*        "3600000J", 70% "70%", 50vu "50vu". A Json value that is a JSON *)
+(*        string gives its content, a number or Bool as above, and an     *)
+(*        object or array its compact JSON text: body["id"].toString()    *)
+(*        gives "42" for 42 and for "42". JSON null has no text: a failed *)
+(*        assert with no value (C141). Checked after parsing: no          *)
+(*        arguments, and a receiver with a text form, so List, Response,  *)
+(*        Target, Fn and Unit are rejected.                               *)
+(*   C178 runs is a Config section that runs the whole suite several      *)
+(*        times, for statistics across runs: runs { count = 10; cooldown  *)
+(*        = 30s; discard = 1; } count is a whole number, at least 1,      *)
+(*        default 1. cooldown is a Time, the pause between two runs,      *)
+(*        default 0s; nothing is sampled during it. discard is a whole    *)
+(*        number below count, default 0: the first discard runs are run   *)
+(*        and reported, but left out of the statistics and the result, to *)
+(*        warm up the system under test itself; warmup only skips the     *)
+(*        start of each run (C167). Each setting at most once, checked    *)
+(*        after parsing. Every run is the whole suite, its Tests in order *)
+(*        (C166): run 1 (T1, T2), run 2 (T1, T2), so drift in the system  *)
+(*        under test spreads over every Test. Runs are independent: each  *)
+(*        has its own virtual users and connections (C170), Setup and     *)
+(*        Cleanup, metrics, variables (C136) and sampling window (C162).  *)
+(*        Verify and stopIf work per run, as in a single run. A Test      *)
+(*        passes when it passed in every counted run (C117). A run that   *)
+(*        does not finish (C132) or an interrupt (C155), also during a    *)
+(*        cooldown, ends the experiment: the runs before it are reported  *)
+(*        and written, and the exit code is 2. --runs on the command line *)
+(*        (C165) replaces count and must leave a counted run. The         *)
+(*        requests file (C120) and the samples file (C173) get the field  *)
+(*        run, the number of the run from 1. An external configuration    *)
+(*        file holds no runs section (C157).                              *)
+(*   C179 Each run has a seed of its own (C165): run 1 uses the seed      *)
+(*        itself, and run n a seed the engine derives from the seed and   *)
+(*        n. So the runs make different random choices (C134), the whole  *)
+(*        experiment repeats from one seed, and a single run repeats      *)
+(*        alone with its own seed, which the report and the summary hold. *)
+(*   C180 Statistics across runs. Every metric is computed per run (C60,  *)
+(*        C109, C135, C160, C161, C176), and the statistics describe      *)
+(*        those per-run values over the counted runs (C178). Latencies    *)
+(*        are not pooled across runs, which would hide how much the runs  *)
+(*        differ. For each value: n, the number of counted runs with a    *)
+(*        value; mean; sd, the sample standard deviation; cv, sd over the *)
+(*        mean as a number from 0 to 100; median; min; max; and ci95, the *)
+(*        95% confidence interval of the mean from Student's t with n - 1 *)
+(*        degrees of freedom. With n = 1, sd, cv and ci95 have no value,  *)
+(*        and cv has none when the mean is 0. The confidence level is     *)
+(*        fixed. The summary (C121) holds them per Test as aggregate,     *)
+(*        with its metrics, endpoints, targets and load generator in the  *)
+(*        layout of one run; the console report (C131) shows the mean,    *)
+(*        the half-width of the interval, n and cv. Criteria on the       *)
+(*        statistics are not part of the language yet: Verify reads one   *)
+(*        run.                                                            *)
+
+(* ---------- Structure ---------- *)
+
+perflang file   = test suite ;
+
+(* An external configuration file (C157). *)
+perflang config file = config block ;
+
+test suite      = "TestSuite", name, "{",
+                    [ config block ],
+                    [ functions block ],
+                    suite body,
+                  "}" ;
+
+(* Load at suite level, then Tests without Load; or no suite-level Load   *)
+(* and every Test defines its own. *)
+suite body      = load block, test, { test }
+                | test with load, { test with load } ;
+
+test            = "Test", name, "{", test phases, "}" ;
+
+test with load  = "Test", name, "{", load block, test phases, "}" ;
+
+test phases     = [ setup block ],
+                  actions block,
+                  [ verify block ],
+                  [ cleanup block ] ;
+
+(* Without stages: one virtual user, one iteration (C124). *)
+load block      = "Load",    "{", { load statement },    "}" ;
+setup block     = "Setup",   "{", { statement }, "}" ;
+actions block   = "Actions", "{", { statement }, "}" ;
+verify block    = "Verify",  "{", { statement }, "}" ;
+cleanup block   = "Cleanup", "{", { statement }, "}" ;
+
+(* ---------- Config (see C97-C100, C119-C121) ---------- *)
+
+(* e.g.  Config {                                                         *)
+(*         sut {                                                          *)
+(*           euCentral   { baseUrl = "https://eu.api.examp.com"; }        *)
+(*           euCentralDb { host = "10.0.0.20"; }                          *)
+(*           usEast      { baseUrl = "https://us.api.examp.com"; }        *)
+(*         }                                                              *)
+(*         output {                                                       *)
+(*           requests {                                                   *)
+(*             file   = "results/requests.jsonl";                         *)
+(*             fields = [time, status, latency];                          *)
+(*           }                                                            *)
+(*           summary = "results/summary.json";                            *)
+(*         }                                                              *)
+(*       }                                                                *)
+(* Each section at most once (checked after parsing, C98). *)
+config block      = "Config", "{", { config section }, "}" ;
+config section    = sut section | output section | monitoring section
+                  | runs section ;
+
+(* Each target name at most once (checked after parsing, C100). *)
+sut section       = "sut", "{", { sut target }, "}" ;
+sut target        = target name, "{", { target setting }, "}" ;
+
+(* Each setting at most once; baseUrl is an http(s) URL with a host and   *)
+(* no trailing "/" (checked after parsing, C99).                          *)
+target setting    = base url setting | host setting
+                  | metrics setting | metrics port setting
+                  | topics setting ;
+base url setting  = "baseUrl", "=", quoted string, ";" ;
+
+(* The machine of a target (C156). *)
+host setting      = "host", "=", quoted string, ";" ;
+
+(* What is measured on the machine of a target (C159). The names are     *)
+(* known ones, checked after parsing. power is reserved (C77), so it is  *)
+(* listed. e.g.  metrics = [cpu[0, 1], mem, disk["nvme0n1"]];            *)
+metrics setting   = "metrics", "=", "[", [ metric source,
+                    { ",", metric source }, [ "," ] ], "]", ";" ;
+metric source     = metric name, [ "[", device, { ",", device }, "]" ] ;
+metric name       = identifier | "power" ;
+device            = integer | quoted string ;
+metrics port setting = "metricsPort", "=", integer, ";" ;
+
+(* The metrics of a target that come over MQTT (C163). *)
+topics setting    = "topics", "{", { metric name, "=", quoted string, ";" }, "}" ;
+
+(* How machines are measured (C158, C161). e.g.                           *)
+(*   monitoring {                                                         *)
+(*     interval = 1s;                                                     *)
+(*     port     = 9100;                                                   *)
+(*     path     = "/metrics";                                             *)
+(*     format   = prometheus;                                             *)
+(*     carbonIntensity = 380gCO2e/kWh;                                    *)
+(*   }                                                                    *)
+(* Each setting at most once, checked after parsing.                      *)
+monitoring section = "monitoring", "{", { monitoring setting }, "}" ;
+monitoring setting = "interval", "=", time literal, ";"
+                   | "port", "=", integer, ";"
+                   | "path", "=", quoted string, ";"
+                   | "format", "=", identifier, ";"
+                   | "carbonIntensity", "=", carbon intensity literal, ";"
+                   | "fields", "{", { metric name, "=", quoted string, ";" }, "}"
+                   | mqtt block ;
+
+(* Each setting at most once, and broker required, checked after parsing  *)
+(* (C163).                                                                 *)
+mqtt block         = "mqtt", "{", { mqtt setting }, "}" ;
+mqtt setting       = "broker", "=", quoted string, ";"
+                   | "qos", "=", integer, ";"
+                   | "fields", "{", { metric name, "=", quoted string, ";" }, "}" ;
+
+(* Grams of CO2-equivalent per kilowatt-hour. Only that setting (C161).   *)
+carbon intensity literal = number literal, "gCO2e/kWh" ;
+
+(* How often the suite runs (C178). Each setting at most once, count at   *)
+(* least 1 and discard below count, checked after parsing. e.g.           *)
+(*   runs { count = 10; cooldown = 30s; discard = 1; }                    *)
+runs section      = "runs", "{", { runs setting }, "}" ;
+runs setting      = "count", "=", integer, ";"
+                  | "cooldown", "=", time literal, ";"
+                  | "discard", "=", integer, ";" ;
+
+(* Each part at most once; summary ends in .json (checked after parsing,  *)
+(* C119, C121).                                                           *)
+output section    = "output", "{", { output setting }, "}" ;
+output setting    = requests block
+                  | "samples", "{", "file", "=", quoted string, ";", "}"
+                  | "summary", "=", quoted string, ";" ;
+
+(* Each setting at most once and file required; file ends in .jsonl;      *)
+(* fields are known field names, at least one, each once (checked after   *)
+(* parsing, C120, C122). latency is reserved (C77), so it is listed.      *)
+requests block    = "requests", "{", { requests setting }, "}" ;
+requests setting  = "file", "=", quoted string, ";"
+                  | "fields", "=", "[", [ field list, [ "," ] ], "]", ";"
+                  | "includeWarmup", "=", bool literal, ";" ;
+field list        = field name, { ",", field name } ;
+field name        = identifier | "latency" ;
+
+(* ---------- Load settings ---------- *)
+
+(* Any order; each setting at most once except stopIf (checked after      *)
+(* parsing, see C78, C61).                                                *)
+load statement        = warmup setting
+                      | curves setting
+                      | stages setting
+                      | think time setting
+                      | request timeout setting
+                      | distribution setting
+                      | retry setting
+                      | stop if setting ;
+
+warmup setting        = "warmup", time literal, ";" ;
+(* A block, so no trailing ";" (C79). *)
+curves setting        = "curves", "{", { curve definition }, "}" ;
+(* An ordered list, so [ ] instead of { } (C19-C23). *)
+stages setting        = "stages", "[", stage, { ",", stage }, [ "," ], "]" ;
+(* Optional; 0ms when left out (C16). *)
+think time setting    = "thinkTime", time literal, ";" ;
+(* Longest time one request may take; above 0 (C96). *)
+request timeout setting = "requestTimeout", time literal, ";" ;
+(* A block like curves: no ";" after "}" (C32, C83). *)
+distribution setting  = "distribution", "{", distribution entry,
+                        { distribution entry }, "}" ;
+(* Stop the test early when the condition holds (C58). *)
+stop if setting       = "stopIf", expression, ";" ;
+(* A block like curves: no ";" after "}" (C37, C84). *)
+retry setting         = "retry", "{", { retry entry }, "}" ;
+
+(* ---------- Curves (see C17, C52, C56, C57) ---------- *)
+
+(* Curve shapes: t runs 0..1 over the stage, result 0..1 (C30).           *)
+(* e.g.  customLinear(t) = t;                                             *)
+(*       easeIn(t) = t^2;                                                 *)
+(*       wave(t, cycles) = t + 0.1 * sin(2 * pi * cycles * t);            *)
+curve definition    = identifier, "(", [ parameter list ], ")",
+                      "=", expression, ";" ;
+parameter list      = identifier, { ",", identifier } ;
+
+(* The body uses the shared expression grammar (see Expressions). *)
+
+(* ---------- Stages ---------- *)
+
+(* e.g.  stages [                                                         *)
+(*         50vu  in  30s   exp,                                           *)
+(*         100vu in  1m    customLinear,                                  *)
+(*         200vu in  1m    wave(3),                                       *)
+(*         300vu for 5m,                                                  *)
+(*         300vu for 1000iter,                                            *)
+(*         300vu for 2iter/vu,                                            *)
+(*         600vu now,                                                     *)
+(*         600vu for 30s,                                                 *)
+(*         0vu   in  7m30s                                                *)
+(*       ]                                                                *)
+stage           = ramp stage | hold stage | now stage ;
+
+(* Ramp to the target user count over the given length, following the     *)
+(* curve; linear when no curve is given (C24).                            *)
+ramp stage      = users literal, "in", stage length, [ curve ] ;
+
+(* Keep the user count constant for the given length (C26). A count per  *)
+(* user, 2iter/vu, only fits here (C175).                                 *)
+hold stage      = users literal, "for", stage length ;
+
+(* Change the user count at once; takes no time, not last (C127). *)
+now stage       = users literal, "now" ;
+
+(* A Time, or a number of iterations through Actions (C101-C103). *)
+stage length    = time literal | iterations literal ;
+
+curve           = identifier, [ "(", [ argument list ], ")" ] ;
+
+(* ---------- Distribution ---------- *)
+
+(* e.g.  distribution {                                                   *)
+(*         euCentral 70%;                                                 *)
+(*         usEast    30%;                                                 *)
+(*       }                                                                *)
+distribution entry = target name, percentage literal, ";" ;
+
+(* Defined in Config's sut section or in an external configuration,      *)
+(* resolved after parsing (C33, C100).                                    *)
+target name        = identifier ;
+
+(* ---------- Retry ---------- *)
+
+(* e.g.  retry {                                                          *)
+(*         attempts 3;                                                    *)
+(*         delay    500ms;                                                *)
+(*         backoff  exponential;                                          *)
+(*       }                                                                *)
+(* Any order; each entry at most once (checked after parsing, C85). *)
+retry entry       = attempts setting
+                  | delay setting
+                  | backoff setting ;
+
+attempts setting  = "attempts", integer, ";" ;
+delay setting     = "delay", time literal, ";" ;
+backoff setting   = "backoff", backoff strategy, ";" ;
+
+(* Strategy names are fixed words here (C86). *)
+backoff strategy  = "fixed" | "linear" | "exponential" ;
+
+(* ---------- Expressions (shared, see C62) ---------- *)
+
+(* One expression grammar for curve bodies, stopIf and statements.        *)
+(* Types (numbers, Time, Energy, Bool, responses, ...) are checked after  *)
+(* parsing, e.g. stopIf needs a Bool and latency.p95() > 10J is an error. *)
+(*                                                                        *)
+(* Precedence, loosest first:                                             *)
+(*   ||   &&   comparisons   + -   * /   unary - !   ^   . and calls      *)
+(* ^ is right-associative; comparisons do not chain (a < b < c is an      *)
+(* error).                                                                *)
+expression        = lambda
+                  | or expression ;
+
+(* ---------- Lambdas and map (see C88-C93) ---------- *)
+
+(* Haskell-style anonymous function, so functions can be passed around: *)
+(*   responses.map(\r -> r.status)                                      *)
+(*   responses.filter(\r -> r.status >= 500)                            *)
+(*   prices.fold(0, \(sum, p) -> sum + p)                               *)
+(* A named fn can be passed the same way: responses.map(checkStatus).   *)
+(* The body is one expression and extends as far right as possible,    *)
+(* as in Haskell; a comma or closing parenthesis ends it.               *)
+(* Parameter types are inferred from where the lambda is used; they may *)
+(* be written out: \(r: Response) -> r.status (C90).                    *)
+lambda            = "\", lambda parameters, "->", expression ;
+lambda parameters = lambda parameter
+                  | "(", lambda parameter, { ",", lambda parameter }, ")" ;
+lambda parameter  = identifier, [ ":", type ] ;
+
+(* Haskell's higher-order list functions as built-in methods (C92).     *)
+(* map, filter, fold, foldl and foldr are reserved words, so .map      *)
+(* always means this rule. foldl goes left to right and foldr right to  *)
+(* left, as in Haskell; fold is the default and means foldl (C93). As  *)
+(* in Haskell, foldl's function takes (acc, x) and foldr's takes (x, acc).*)
+(* e.g.  xs.map(\x -> x * 2)                                            *)
+(*       xs.filter(\x -> x > 0)                                         *)
+(*       xs.fold(0, \(acc, x) -> acc + x)                               *)
+(*       xs.foldr(0, \(x, acc) -> x + acc)                              *)
+list operation    = ".", ( "map", "(", function value, ")"
+                         | "filter", "(", function value, ")"
+                         | ( "fold" | "foldl" | "foldr" ),
+                           "(", expression, ",", function value, ")" ) ;
+
+(* A lambda, or the name of a fn or of a variable holding a function. *)
+function value    = lambda | identifier ;
+or expression     = and expression, { "||", and expression } ;
+and expression    = comparison, { "&&", comparison } ;
+comparison        = sum, [ comparison operator, sum ] ;
+comparison operator = ">=" | "<=" | ">" | "<" | "==" | "!=" ;
+sum               = product, { ( "+" | "-" ), product } ;
+product           = factor, { ( "*" | "/" ), factor } ;
+factor            = [ "-" | "!" ], exponent ;
+exponent          = postfix, [ "^", factor ] ;
+
+(* Member access and calls chain left to right:                           *)
+(*   sut.euCentral.http.get("/products")    response.status               *)
+(* Indexing reads JSON arrays and fields (C68):                           *)
+(*   body["items"][0]["price"]                                            *)
+(* A random item of a list or JSON array (C134):                          *)
+(*   body["products"].random()["id"]                                      *)
+(* The other list methods are plain member calls too (C137, C145):       *)
+(*   items.length()    items.contains(x)    cartIdList.add(cartId)        *)
+(* The text of a value is a plain member call too (C177):               *)
+(*   "username_" + userIndex.toString()                                   *)
+postfix           = primary, { list operation
+                             | ".", member name
+                             | "(", [ argument list ], ")"
+                             | "[", expression, "]" } ;
+argument list     = expression, { ",", expression } ;
+
+(* Metric group names are allowed after "." (C111), and so is http        *)
+(* (C112).                                                                *)
+member name       = identifier
+                  | "latency" | "throughput" | "errors"
+                  | "energy" | "power" | "carbon" | "asserts" | "checks"
+                  | "http" ;
+
+primary           = literal
+                  | match expression
+                  | metric
+                  | json object
+                  | json array
+                  | identifier
+                  | "http"
+                  | "(", expression, ")" ;
+
+(* The HTTP client (C112-C115):                                           *)
+(*   http.get("https://api.example.com/health")                           *)
+(*   sut.euCentral.http.post("/checkout", body,                           *)
+(*                           { "headers": { "X-Trace": "1" } })           *)
+(* Methods, arguments, urls and options are checked after parsing.        *)
+
+(* ---------- JSON (see C66, C67-C69) ---------- *)
+
+(* JSON is a core type. Any valid JSON can be pasted in as is, and        *)
+(* values may also be PerfLang expressions:                               *)
+(* e.g.  let body = { "id": productId, "tags": ["a", "b"], "qty": 1 };    *)
+(* A "{" right after a complete expression starts a block (if, while,     *)
+(* for, match); a "{" where a value is expected starts a JSON object.     *)
+json object       = "{", [ json member, { ",", json member }, [ "," ] ], "}" ;
+json member       = quoted string, ":", json value ;
+json array        = "[", [ json value, { ",", json value }, [ "," ] ], "]" ;
+
+(* null exists only as a JSON value, not as a PerfLang value (C69). *)
+json value        = expression | "null" ;
+
+(* ---------- Metrics (see C59, C60) ---------- *)
+
+(* e.g.  latency.p95()   energy.perRequest()   latency.percentile(99.9)   *)
+(* CPU is not a metric group: it is read through the targets, e.g.        *)
+(* sut.euCentral.cpu.max(), sut.cpu.max(), loadGenerator.cpu.max()        *)
+(* (C109).                                                                *)
+(* Per target, the request metrics are read through the target too, e.g.  *)
+(* sut.euCentral.latency.p95() (C176).                                    *)
+metric            = latency metric
+                  | throughput metric
+                  | errors metric
+                  | energy metric
+                  | power metric
+                  | carbon metric
+                  | asserts metric
+                  | checks metric ;
+
+(* Type Time. percentile takes the percentile as a number. *)
+latency metric    = "latency", ".",
+                    ( ( "p50" | "p90" | "p95" | "p99" | "mean" | "min" | "max" ),
+                      "(", ")"
+                    | "percentile", "(", number literal, ")" ) ;
+
+(* Type Number: requests per second. *)
+throughput metric = "throughput", ".", "perSecond", "(", ")" ;
+
+(* rate is of type Percentage; count, timeouts, connectionErrors,        *)
+(* assertFailures and checkFailures of type Number. All count HTTP       *)
+(* requests (C107).                                                      *)
+errors metric     = "errors", ".",
+                    ( "rate" | "count" | "timeouts" | "connectionErrors"
+                    | "assertFailures" | "checkFailures" ),
+                    "(", ")" ;
+
+(* Type Energy. *)
+energy metric     = "energy", ".", ( "total" | "perRequest" | "perUser" ),
+                    "(", ")" ;
+
+(* Type Power. *)
+power metric      = "power", ".", ( "mean" | "peak" ), "(", ")" ;
+
+(* Type Carbon. *)
+carbon metric     = "carbon", ".", ( "total" | "perRequest" ), "(", ")" ;
+
+(* failed is of type Number, rate of type Percentage (C118). *)
+asserts metric    = "asserts", ".", ( "failed" | "rate" ), "(", ")" ;
+
+(* failed is of type Number, rate of type Percentage (C130). *)
+checks metric     = "checks", ".", ( "failed" | "rate" ), "(", ")" ;
+
+literal           = time literal
+                  | energy literal
+                  | power literal
+                  | carbon literal
+                  | users literal
+                  | percentage literal
+                  | number literal
+                  | string literal
+                  | bool literal ;
+
+(* ---------- Statements (see C43-C47, C49, C63, C76, C70) ----------     *)
+
+(* The same statements are used in Setup, Actions, Verify and Cleanup     *)
+(* (C49).                                                                 *)
+(* e.g.  let euCentralResponse = sut.euCentral.http.get("/products");     *)
+(*       let mut attempts = 0;                                            *)
+(*       attempts = attempts + 1;                                         *)
+statement            = let statement
+                     | assignment statement
+                     | assert statement
+                     | check statement
+                     | if statement
+                     | while statement
+                     | for statement
+                     | match statement
+                     | return statement
+                     | expression statement ;
+
+(* Declares a variable, immutable unless marked mut (C47). The type is    *)
+(* inferred unless given.                                                 *)
+let statement        = "let", [ "mut" ], identifier, [ ":", type ],
+                       "=", expression, ";" ;
+
+(* Gives a mut variable a new value. Assigning to a variable declared     *)
+(* without mut is an error, checked after parsing (C76).                  *)
+assignment statement = identifier, "=", expression, ";" ;
+
+(* A call whose result is not kept, e.g. sut.euCentral.http.post(...);    *)
+(* or sleep(2s); (C133). Must be a call; checked after parsing (C63).     *)
+expression statement = expression, ";" ;
+
+(* e.g.  assert response.status == 200;                                   *)
+(* The expression must be of type Bool, checked after parsing.            *)
+assert statement     = "assert", expression, ";" ;
+
+(* e.g.  check response.status == 200;                                    *)
+(* A soft assert: a failed check stops nothing and does not fail the     *)
+(* Test (C129). The expression must be of type Bool, checked after       *)
+(* parsing.                                                              *)
+check statement      = "check", expression, ";" ;
+
+(* Built-in type names are PascalCase; the full list is in C138. *)
+type name            = identifier ;
+
+(* A type, optionally with type arguments: Response, List<Response>       *)
+(* (C72).                                                                 *)
+(* Write a space before "=" after a generic type: List<Time> = ..., since *)
+(* ">=" would otherwise be read as one token.                             *)
+type                 = type name, [ "<", type, { ",", type }, ">" ] ;
+
+(* ---------- Control flow (see C55, C73-C75) ---------- *)
+
+block                = "{", { statement }, "}" ;
+
+(* Braces are required, so no parentheses are needed around the           *)
+(* condition; writing them, as in Java, still works.                      *)
+if statement         = "if", expression, block,
+                       [ "else", ( if statement | block ) ] ;
+
+while statement      = "while", expression, block ;
+
+(* e.g.  for region in regions { ... }    for i in range(0, 10) { ... }   *)
+for statement        = "for", identifier, "in", expression, block ;
+
+(* Haskell-style case analysis (C75). match is an expression: it gives    *)
+(* the value of the arm that runs, so it can be used anywhere a value     *)
+(* is expected. The first matching arm wins.                              *)
+(* e.g.  let kind = match response.status {                               *)
+(*         200            => "ok",                                        *)
+(*         404            => "missing",                                   *)
+(*         s if s >= 500  => "server error",                              *)
+(*         _              => "other",                                     *)
+(*       };                                                               *)
+(* An arm may be a block instead, for side effects; such an arm gives     *)
+(* Unit. A "{" after "=>" always starts a block, so an arm that gives a   *)
+(* JSON object wraps it in parentheses: 200 => ({ "ok": true }).          *)
+(* Checked after parsing: a match used as a value gives one type in all   *)
+(* arms and covers every case (e.g. ends with _), since there is no null  *)
+(* to fall back on (C148).                                                *)
+match expression     = "match", expression, "{",
+                       match arm, { ",", match arm }, [ "," ], "}" ;
+match arm            = pattern, [ "if", expression ], "=>",
+                       ( block | expression ) ;
+pattern              = [ "-" ], literal
+                     | identifier
+                     | "_" ;
+
+(* A match on its own as a statement needs no ";", like if and while.     *)
+match statement      = match expression ;
+
+(* Only allowed inside a function; checked after parsing (C74).           *)
+return statement     = "return", [ expression ], ";" ;
+
+(* ---------- Suite functions (see C53-C55, C71, C72) ---------- *)
+
+(* e.g.  Functions {                                                      *)
+(*         fn fetchProducts(region: Target): Response {                   *)
+(*           let response = region.http.get("/products");                 *)
+(*           assert response.status == 200;                               *)
+(*           return response;                                             *)
+(*         }                                                              *)
+(*       }                                                                *)
+functions block      = "Functions", "{", { fn declaration }, "}" ;
+
+fn declaration       = "fn", identifier, "(", [ fn parameter list ], ")",
+                       ":", type, block ;
+fn parameter list    = fn parameter, { ",", fn parameter } ;
+fn parameter         = identifier, ":", type ;
+
+(* ---------- Literals ---------- *)
+
+(* Value of type Time. No whitespace between number and unit (C15).  *)
+(* Units may be combined, largest first, each at most once (C29).         *)
+(* Range limits on the later parts are checked after parsing (C31, C80).  *)
+(* Decimals are allowed (C57); in a combined Time only the last part      *)
+(* may have them: 1m30.5s is valid, 1.5m30s is not (C81).                 *)
+(* "ms" is one unit: 5ms is five milliseconds, never 5m followed by s.    *)
+time literal    = hours, [ minutes ], [ seconds ], [ milliseconds ]
+                | minutes, [ seconds ], [ milliseconds ]
+                | seconds, [ milliseconds ]
+                | milliseconds ;
+hours           = number literal, "h" ;
+minutes         = number literal, "m" ;
+seconds         = number literal, "s" ;
+milliseconds    = number literal, "ms" ;
+
+(* Sustainability types (C40-C42, C57). Same form as Time: a number       *)
+(* directly followed by its unit.                                         *)
+energy literal     = number literal, energy unit ;
+energy unit        = "mJ" | "J" | "kJ" | "MJ" | "Wh" | "kWh" | "MWh" ;
+
+power literal      = number literal, power unit ;
+power unit         = "mW" | "W" | "kW" ;
+
+(* Grams of CO2-equivalent. *)
+carbon literal     = number literal, carbon unit ;
+carbon unit        = "mgCO2e" | "gCO2e" | "kgCO2e" ;
+
+(* Units are case-sensitive and read longest-match first: 5ms is          *)
+(* milliseconds, 5mJ millijoules, 5mW milliwatts, never 5m followed by    *)
+(* "s", "J" or "W"; 5MJ is megajoules.                                    *)
+
+(* Value of type VirtualUsers (C94, C95): a whole number directly       *)
+(* followed by "vu", no space: 50vu, 0vu. No decimals.                 *)
+users literal      = integer, "vu" ;
+
+(* Iteration count, only a stage length (C101-C103): a whole number       *)
+(* directly followed by "iter", no space: 10iter. With "iter/vu" it is a  *)
+(* count per virtual user, one token, only in a hold stage: 20vu for      *)
+(* 1iter/vu (C175). Greater than 0 (checked after parsing, C102).         *)
+iterations literal = integer, ( "iter" | "iter/vu" ) ;
+
+(* Value of type Percentage (C34, C35, C82). Two decimal places at most.  *)
+percentage literal = integer, [ ".", digit, [ digit ] ], "%" ;
+
+(* Value of type String (C64, C65). Used for values such as URLs and bodies; *)
+(* names stay plain identifiers (C7).                                     *)
+string literal     = quoted string | raw string ;
+
+quoted string      = '"', { string character }, '"' ;
+string character   = ? any character except '"', '\' and newline ?
+                   | "\", ( '"' | "\" | "n" | "t" ) ;
+
+(* Raw string (C65): may span lines, no escapes, content kept exactly.    *)
+(* e.g.  let body = """{"id": 42, "name": "Lamp"}""";                     *)
+(* A token starting with three quotes is always a raw string, so ""       *)
+(* is the empty quoted string and """ starts a raw one.                   *)
+raw string         = '"""', ? any characters not containing '"""' ?, '"""' ;
+
+(* Value of type Bool. *)
+bool literal       = "true" | "false" ;
+
+(* Plain number, also the number part of unit values; decimals allowed    *)
+(* (C57).                                                                 *)
+number literal  = integer, [ ".", integer ] ;
+
+integer         = digit, { digit } ;
+
+(* ---------- Lexical ---------- *)
+
+name            = identifier ;
+
+identifier      = letter, { letter | digit | "_" } ;
+
+letter          = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I"
+                | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R"
+                | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z"
+                | "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i"
+                | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r"
+                | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
+
+digit           = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+
+(* Whitespace and comments may appear between any two tokens. *)
+comment         = "//", { ? any character except newline ? }
+                | "/*", { ? any character ? }, "*/" ;

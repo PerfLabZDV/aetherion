@@ -1,0 +1,297 @@
+// Every example from perflang.ebnf (version 1.11), combined into one suite.
+
+TestSuite ShopCheckout {
+  // C97-C100: targets defined here are used as sut.euCentral and in distribution.
+  Config {
+    sut {
+      euCentral { baseUrl = "https://eu.api.examp.com"; metrics = [cpu, power]; topics { power = "tele/eu/SENSOR"; } }
+      usEast    { baseUrl = "https://us.api.examp.com"; }
+
+      // C156, C159: a machine that is measured is a target of its own.
+      euCentralDb  { host = "10.0.0.20"; metrics = [cpu[0, 1], mem, disk["nvme0n1"], gpu[2]]; }
+      euCentralGpu { host = "10.0.0.20"; metricsPort = 9400; metrics = [gpu]; }
+
+      // C163: a device that only publishes needs no host.
+      euCentralPlug { metrics = [power]; topics { power = "tele/plug/SENSOR"; } }
+    }
+
+    // C119-C122: where the engine writes the records and the summary.
+    output {
+      requests {
+        file          = "results/requests.jsonl";
+        fields        = [time, run, target, status, latency, outcome];
+        includeWarmup = true;
+      }
+      summary = "results/summary.json";
+
+      // C173: every sample of the agents and over MQTT.
+      samples { file = "results/samples.jsonl"; }
+    }
+
+    // C158, C161: how machines are measured.
+    monitoring {
+      interval = 1s;
+      port     = 9100;
+      path     = "/metrics";
+      format   = prometheus;
+      fields   { gpu = "DCGM_FI_DEV_GPU_UTIL"; }
+      carbonIntensity = 380gCO2e/kWh;
+
+      // C163: metrics that a device publishes itself.
+      mqtt {
+        broker = "mqtt://broker.examp.com:1883";
+        qos    = 1;
+        fields { power = "ENERGY.Power"; }
+      }
+    }
+
+    // C178: the whole suite runs 11 times, 30s apart; the first run is left out.
+    runs {
+      count    = 11;
+      cooldown = 30s;
+      discard  = 1;
+    }
+  }
+
+  Functions {
+    // C53, C54, C71
+    fn fetchProducts(region: Target): Response {
+      let response = region.http.get("/products");
+      assert response.status == 200;
+      return response;
+    }
+
+    // C55, C74: recursion is allowed in full functions.
+    fn countdown(n: Int): Int {
+      if n <= 0 {
+        return 0;
+      } else if n == 1 {
+        return 1;
+      } else {
+        return countdown(n - 1);
+      }
+    }
+
+    // C75: match as an expression, with literal, guard, binding and _ patterns.
+    fn classify(response: Response): String {
+      let kind = match response.status {
+        200            => "ok",
+        404            => "missing",
+        s if s >= 500  => "server error",
+        _              => "other",
+      };
+      return kind;
+    }
+
+    // C88-C93: lambdas, map, filter, fold, foldl and foldr.
+    fn statusSummary(responses: List<Response>): Int {
+      let statuses = responses.map(\r -> r.status);
+      let failures = responses.filter(\r -> r.status >= 500);
+      let typed = responses.map(\(r: Response) -> r.status);
+      let total = statuses.fold(0, \(sum, p) -> sum + p);
+      let left = statuses.foldl(0, \(acc, x) -> acc + x);
+      let right = statuses.foldr(0, \(x, acc) -> x + acc);
+      let checked = responses.map(checkStatus);
+      return total + left - right;
+    }
+
+    // C90: function types use the generic syntax.
+    fn checkStatus(r: Response): Bool {
+      let toStatus: Fn<Response, Int> = \r -> r.status;
+      return toStatus(r) == 200;
+    }
+  }
+
+  Load {
+    // C12, C14, C16, C96
+    warmup 2m;
+    thinkTime 3s;
+    requestTimeout 5s;
+
+    // C17, C52, C56
+    curves {
+      customLinear(t) = t;
+      easeIn(t) = t^2;
+      wave(t, cycles) = t + 0.1 * sin(2 * pi * cycles * t);
+    }
+
+    // C19-C29, C94, C101-C103, C127, C128, C175
+    stages [
+      50vu  in  30s   exp,
+      100vu in  1m    customLinear,
+      200vu in  1m    wave(3),
+      300vu for 5m,
+      300vu for 1000iter,
+      300vu for 2iter/vu,
+      600vu now,
+      600vu for 30s,
+      0vu   in  7m30s,
+    ]
+
+    // C32-C36
+    distribution {
+      euCentral 70%;
+      usEast    30%;
+    }
+
+    // C37, C38, C86
+    retry {
+      attempts 3;
+      delay    500ms;
+      backoff  exponential;
+    }
+
+    // C58, C61
+    stopIf errors.rate() > 5%;
+    stopIf asserts.rate() > 1%;                 // C117, C118
+    stopIf latency.p95() > 2s && energy.perRequest() > 10J;
+  }
+
+  Test BrowseProducts {
+    Setup {
+      // C44, C45, C47, C70, C95
+      let euCentralResponse = sut.euCentral.http.get("/products");
+      let timeout: Time = 5s;
+      let peak = 300vu;
+      let regions: List<Target> = [sut.euCentral, sut.usEast];
+
+      // C137: one list shared by all virtual users.
+      let mut seenStatuses: List<Int> = [];
+    }
+
+    Actions {
+      // C137: a Setup variable is never assigned from Actions.
+      let mut attempts = 0;
+
+      // C73: loops in every phase, ranges via range(a, b).
+      for region in regions {
+        let r = fetchProducts(region);
+      }
+      for i in range(0, 10) {
+        attempts = attempts + 1;
+      }
+      while attempts < 20 {
+        attempts = attempts + 1;
+      }
+      let responses = [euCentralResponse];
+
+      // C168: a target picked by distribution, for this iteration.
+      let any = sut.any.http.get("/products");
+
+      // C134: a random item of a list or JSON array.
+      let anyRegion = regions.random();
+      let anyProductId = euCentralResponse.body["products"].random()["id"];
+      let twoRegions = regions.random(2);
+
+      // C137, C145: list methods, and + on strings.
+      seenStatuses.add(euCentralResponse.status);
+      let regionCount = regions.length();
+      let unknownRegion = !regions.contains(anyRegion);
+      let path = "/products/" + anyProductId;
+
+      // C177: the text of a value, to join a number to a String.
+      let userIndex = range(0, 962).random();
+      let username = "username_" + userIndex.toString();
+
+      // C142: arithmetic on units.
+      let pause = 2 * (500ms + 1s);
+      let usedPower = 10J / pause;
+      let usedEnergy = usedPower * pause;
+    }
+
+    Verify {
+      // C50, C59, C60
+      assert euCentralResponse.status == 200;
+      assert latency.p50() < 500ms;
+      assert latency.percentile(99.9) < 1500ms;
+      assert throughput.perSecond() > 100;
+      assert errors.count() < 10;
+      assert energy.total() < 0.5kWh;
+      assert energy.perUser() < 5mJ;
+      assert power.mean() < 2kW;
+      assert power.peak() < 500mW;
+      assert carbon.total() < 2.5gCO2e;
+      assert carbon.perRequest() < 1mgCO2e;
+
+      // C107-C109, C118, C125: request outcomes, failed asserts and CPU per target, for all targets and for the load generator.
+      assert errors.timeouts() == 0;
+      assert errors.connectionErrors() == 0;
+      assert errors.assertFailures() == 0;
+      assert asserts.failed() == 0;
+
+      // C129, C130: soft asserts are counted, never fail the Test themselves.
+      check errors.checkFailures() < 10;
+      assert checks.rate() < 1%;
+      assert sut.euCentral.cpu.max() < 80%;
+      assert sut.euCentralDb.cpu.max() < 80%;
+
+      // C160: the other machine readings, and the load generator.
+      assert sut.euCentralDb.mem.max() < 80%;
+      assert sut.euCentral.power.mean() < 200W;
+      assert sut.gpu.mean() < 50%;
+      assert loadGenerator.mem.max() < 70%;
+      assert sut.cpu.mean() < 50%;
+      assert loadGenerator.cpu.max() < 70%;
+      assert peak > 200vu;
+
+      // C176: request metrics per target, directly and through a Target value.
+      assert sut.euCentral.latency.p95() < 300ms;
+      assert sut.euCentral.errors.rate() < 1%;
+      for region in [sut.euCentral, sut.usEast] {
+        assert region.latency.p95() < 300ms;
+      }
+    }
+  }
+
+  Test Checkout {
+    Setup {
+      // C64-C69: strings, raw strings and JSON.
+      let productId = 42;
+      let body = { "id": productId, "tags": ["a", "b"], "qty": 1, "note": null };
+      let raw = """{"id": 42, "name": "Lamp"}""";
+      let escaped = "line\n\t\"quoted\" \\ done";
+    }
+
+    Actions {
+      let response = sut.euCentral.http.post("/checkout", body);
+      sut.euCentral.http.post("/audit", raw);
+
+      // C133: a pause at one step, on top of thinkTime.
+      sleep(2s);
+
+      // C112-C115, C123: http calls with and without a target, with options.
+      // A JSON body is sent as application/json, a string as text/plain,
+      // and the header replaces the default.
+      http.get("http://192.168.178.71:8080/api/health");
+      sut.usEast.http.get("/products", {
+        "headers": { "Accept": "application/json" },
+        "query":   { "page": 2 }
+      });
+      sut.euCentral.http.put("/cart", "", { "headers": { "X-Trace": "1" } });
+      sut.euCentral.http.patch("/cart", { "qty": 2 });
+      sut.euCentral.http.post("/audit", raw, { "headers": { "content-type": "application/json" } });
+      sut.euCentral.http.head("/checkout");
+      let price = response.body["items"][0]["price"];
+
+      // C110: a failed call still returns a Response.
+      assert response.outcome == "ok" || response.status == 0;
+      assert response.latency < 5s;
+
+      // C75: a match as a statement, with block arms and a JSON arm.
+      match response.status {
+        200 => { assert price > 0; },
+        201 => ({ "ok": true }),
+        _ => { assert false; },
+      }
+    }
+
+    Verify {
+      assert response.status == 200 || response.status == 201;
+      assert classify(response) == "ok";
+    }
+
+    Cleanup {
+      sut.euCentral.http.delete("/checkout");
+    }
+  }
+}

@@ -1,0 +1,164 @@
+// Mixed social network workload, from the wrk2 script of DeathStarBench's
+// socialNetwork (mixed-workload.lua): every iteration sends one request,
+// picked at random like the script's coin: 60% read a home timeline, 30%
+// read a user timeline and 10% compose a post, each for a random user.
+//
+// A composed post has 256 random characters of text, 1 to 6 mentions of other
+// users, 1 to 6 random URLs and 1 to 5 media ids of 18 random digits. The
+// script loops "for i = 0, n", which runs n + 1 times, so the counts here
+// are one higher than its math.random(0, n) suggests.
+//
+// max_user_index comes from an environment variable in the script, with a
+// default of 962. PerfLang has no environment variables, so maxUserIndex()
+// returns that default; change it there.
+//
+// toString() turns the random Ints into text for the form body (C177):
+// + only joins two Strings (C145). The timeline reads pass their Ints in the
+// query option, which needs no conversion (C115).
+//
+// The test only reports, like a wrk2 run: no Verify and no assert, so a
+// failed request counts in the error rates of its endpoint but never fails
+// the Test (C106, C117, C135). The run exits with 0, or with 2 when it cannot
+// run or is aborted (C132).
+
+TestSuite MixedWorkload {
+  Config {
+    sut {
+      // The nginx front end of socialNetwork.
+      socialNetwork { baseUrl = "http://localhost:8080"; }
+    }
+
+    output {
+      // One JSON line per request (C120, C122). The three endpoints get
+      // their own metrics in the summary without any setting (C135).
+      requests {
+        file   = "results/mixed_workload_requests.jsonl";
+        fields = [time, method, url, status, latency, outcome];
+      }
+      summary = "results/mixed_workload_summary.json";
+    }
+  }
+
+  Functions {
+    // users are username_0 to username_<maxUserIndex() - 1>.
+    fn maxUserIndex(): Int {
+      return 962;
+    }
+
+    // A random user index, every user equally likely: range gives the Ints
+    // from 0 up to, not including, maxUserIndex() (C134, C144).
+    fn randomUser(): Int {
+      return range(0, maxUserIndex()).random();
+    }
+
+    fn randomText(length: Int): String {
+      let charset = [
+        "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "a", "s", "d", "f",
+        "g", "h", "j", "k", "l", "z", "x", "c", "v", "b", "n", "m", "Q", "W",
+        "E", "R", "T", "Y", "U", "I", "O", "P", "A", "S", "D", "F", "G", "H",
+        "J", "K", "L", "Z", "X", "C", "V", "B", "N", "M", "1", "2", "3", "4",
+        "5", "6", "7", "8", "9", "0"
+      ];
+      let mut text = "";
+      for i in range(0, length) {
+        text = text + charset.random();
+      }
+      return text;
+    }
+
+    fn randomDigits(length: Int): String {
+      let digits = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
+      let mut text = "";
+      for i in range(0, length) {
+        text = text + digits.random();
+      }
+      return text;
+    }
+
+    // Reads the home or the user timeline of a random user: 10 posts from a
+    // random start between 0 and 100. The script sends a Content-Type on
+    // these GETs too, so this does the same.
+    fn readTimeline(path: String): Response {
+      let start = range(0, 101).random();
+
+      return sut.socialNetwork.http.get(path, {
+        "headers": { "Content-Type": "application/x-www-form-urlencoded" },
+        "query": { "user_id": randomUser(), "start": start, "stop": start + 10 }
+      });
+    }
+
+    fn composePost(): Response {
+      let userIndex = randomUser();
+      let mut text = randomText(256);
+
+      // Mentions of other users: a user never mentions itself.
+      for i in range(0, range(0, 6).random() + 1) {
+        let mut mentionId = randomUser();
+        while mentionId == userIndex {
+          mentionId = randomUser();
+        }
+        text = text + " @username_" + mentionId.toString();
+      }
+
+      for i in range(0, range(0, 6).random() + 1) {
+        text = text + " http://" + randomText(64);
+      }
+
+      // media_ids=["...","..."] and media_types=["png","png"], one entry per
+      // media, as the script writes them.
+      let mut mediaIds = "";
+      let mut mediaTypes = "";
+      for i in range(0, range(0, 5).random() + 1) {
+        if i > 0 {
+          mediaIds = mediaIds + ",";
+          mediaTypes = mediaTypes + ",";
+        }
+        mediaIds = mediaIds + "\"" + randomDigits(18) + "\"";
+        mediaTypes = mediaTypes + "\"png\"";
+      }
+
+      // The script's other body, without media, is never sent: num_media is
+      // a number, and every number is true in Lua. Like the script, the
+      // values are not URL-encoded.
+      let body = "username=username_" + userIndex.toString()
+        + "&user_id=" + userIndex.toString()
+        + "&text=" + text
+        + "&media_ids=[" + mediaIds + "]"
+        + "&media_types=[" + mediaTypes + "]"
+        + "&post_type=0";
+
+      // A string body is sent as written; the header replaces its default
+      // Content-Type text/plain (C123).
+      return sut.socialNetwork.http.post("/wrk2-api/post/compose", body, {
+        "headers": { "Content-Type": "application/x-www-form-urlencoded" }
+      });
+    }
+  }
+
+  Test MixedWorkload {
+    Load {
+      // wrk2 sends as fast as its rate allows, so no thinkTime (C16).
+      requestTimeout 5s;            // a timeout counts as a failure (C96, C105)
+      warmup 30s;                   // the ramp is not measured (C167)
+
+      stages [
+        50vu in  30s,               // linear ramp from 0 to 50 users (C128)
+        50vu for 5m                 // hold 50 users
+      ]
+    }
+
+    // One iteration is one request (C103). The coin is an Int from 0 to 99,
+    // so the three shares are exactly 60%, 30% and 10%.
+    Actions {
+      let coin = range(0, 100).random();
+
+      if coin < 60 {
+        readTimeline("/wrk2-api/home-timeline/read");
+      } else if coin < 90 {
+        readTimeline("/wrk2-api/user-timeline/read");
+      } else {
+        composePost();
+      }
+    }
+  }
+}

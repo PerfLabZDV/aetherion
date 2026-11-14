@@ -1,0 +1,44 @@
+// An external configuration file (C157): the targets of one environment, for
+// tests that run against several environments unchanged. It holds one Config
+// block, and for now only its sut and monitoring sections. A target defined here
+// replaces the one of the same name in a suite's Config, and so does monitoring.
+//
+// Targets are flat (C156). A target with a baseUrl takes requests, and a target
+// with metrics is a machine that is measured (C159), read with
+// sut.euCentralApp.cpu.max() (C160). Readings cover only the selected devices.
+// A metric with a topic comes over MQTT and the others from the agent (C163).
+// A Tasmota plug publishes every TelePeriod seconds: 300 by default, 10 at least,
+// so set it low enough to get several samples in a test.
+
+Config {
+  sut {
+    productApi   { baseUrl = "http://192.168.178.71:8080"; }
+
+    euCentral    { baseUrl = "https://eu.api.examp.com"; }
+    euCentralApp {
+      host    = "10.0.0.10";
+      metrics = [cpu, mem, disk, gpu, power];
+      topics  { power = "tele/eucentral-app-server/SENSOR"; }
+    }
+    euCentralDb  { host = "10.0.0.20"; metrics = [mem, disk]; }
+
+    usEast       { baseUrl = "https://us.api.examp.com"; }
+    usEastApp    { host = "10.0.1.10"; metrics = [cpu[0, 1], mem, disk, gpu[2]]; }
+    usEastDb     { host = "10.0.1.20"; metrics = [mem, disk["nvme0n1"]]; }
+  }
+
+  monitoring {
+    interval = 1s;                  // sampling costs CPU on the measured machine
+    port     = 9100;
+    path     = "/metrics";
+    format   = prometheus;
+    fields   { gpu = "DCGM_FI_DEV_GPU_UTIL"; }   // cpu, mem and disk are computed
+    carbonIntensity = 380gCO2e/kWh;
+
+    mqtt {
+      broker = "mqtt://broker.examp.com:1883";
+      qos    = 1;
+      fields { power = "ENERGY.Power"; }
+    }
+  }
+}

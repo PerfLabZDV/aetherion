@@ -1,0 +1,53 @@
+// Concurrent users: 50 virtual users, all starting at once, each sending
+// GET requests for 2 minutes with 1 second think time between them.
+//
+// Per request, the engine records status code, latency and outcome
+// (ok, failed, timeout, connectionError, assertFailed) on its own (C104,
+// C105, C125), so the test needs no recording statements; output says
+// where they are written.
+
+TestSuite ConcurrentUserLoad {
+  Config {
+    sut {
+      productApi { baseUrl = "http://192.168.178.71:8080"; }
+    }
+
+    output {
+      // One JSON line per request, with the fields the prompt asks for (C120, C122).
+      requests {
+        file   = "results/concurrent_user_load_requests.jsonl";
+        fields = [time, status, latency, outcome];
+      }
+      summary = "results/concurrent_user_load_summary.json";   // metrics and failed asserts (C121)
+    }
+  }
+
+  Test GetProducts {
+    Load {
+      thinkTime 1s;                 // each user waits after every response (C16)
+      requestTimeout 5s;            // a timeout counts as a failure (C105)
+
+      // A hold stage with no ramp before it: all 50 users start at once
+      // and keep sending requests for 2 minutes (C128).
+      stages [ 50vu for 2m ]
+    }
+
+    Actions {
+      let response = sut.productApi.http.get("/api/products");
+
+      // Only 200 is a success. Timeouts and connection errors have
+      // status 0 (C110), so they fail this assert too. A failed assert
+      // ends this iteration and the user goes on with its next one (C116).
+      assert response.status == 200;
+    }
+
+    // Pass criterion: no failed request. A failed assert in Actions does not
+    // fail the Test, Verify decides (C117). errors.count() includes failed
+    // asserts: a request that was ok but fails the assert is recorded as
+    // assertFailed, a timeout or connection error keeps its outcome (C107,
+    // C125).
+    Verify {
+      assert errors.count() == 0;
+    }
+  }
+}

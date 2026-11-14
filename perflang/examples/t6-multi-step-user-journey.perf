@@ -1,0 +1,80 @@
+// Multi-step user journey: 30 virtual users, all starting at once, repeat an
+// e-commerce journey for 5 minutes with 1 second think time after each
+// response: get the product catalog, add one random product to a cart, and
+// submit an order. When a step fails, the rest of the journey is skipped and
+// the user starts a new one. The test passes only if, over the full run, the
+// error rate is below 2%.
+//
+// Per request, the engine records status code, latency and outcome
+// (ok, failed, timeout, connectionError, assertFailed) on its own (C104,
+// C105, C125), so the test needs no recording statements.
+//
+// At the end of the run the engine prints the assert in Verify with its
+// measured value and whether it passed, latency, error rate and the other
+// request metrics for each endpoint (C135), and the result of the Test
+// (C131). The summary file holds the same (C121). The run exits with 0 when
+// the Test passes, 1 when it fails and 2 when it cannot run (C132).
+
+TestSuite MultiStepUserJourney {
+  Config {
+    sut {
+      shop { baseUrl = "http://192.168.178.71:8080"; }
+    }
+
+    output {
+      // One JSON line per request: the raw records behind the metrics per
+      // endpoint (C120, C122).
+      requests {
+        file   = "results/multi_step_user_journey_requests.jsonl";
+        fields = [time, method, url, status, latency, outcome];
+      }
+      summary = "results/multi_step_user_journey_summary.json";   // criterion, metrics per endpoint, result (C121, C135)
+    }
+  }
+
+  Test UserJourney {
+    Load {
+      thinkTime 1s;                 // each user waits after every response (C16)
+      requestTimeout 5s;            // a timeout counts as a failure (C105)
+
+      // A hold stage with no ramp before it: all 30 users start at once
+      // and repeat the journey for 5 minutes (C128).
+      stages [ 30vu for 5m ]
+    }
+
+    // One iteration is one journey (C103). A failed assert ends the
+    // iteration, so the rest of the journey is skipped and the user starts a
+    // new one (C116). It counts in errors.rate() but does not fail the Test
+    // by itself, Verify decides (C117, C125). Timeouts and connection errors
+    // have status 0 (C110), so they fail the asserts too and keep their own
+    // outcome (C105).
+    Actions {
+      let catalog = sut.shop.http.get("/api/products");
+      assert catalog.status == 200;
+
+      // An empty catalog is a failed assert too (C134).
+      let productCatalog = catalog.body["products"];
+      let productId = productCatalog.random()["id"];
+
+      // A JSON body is sent with Content-Type: application/json (C123).
+      let cart = sut.shop.http.post(
+        "/api/carts",
+        { "items": [{ "productId": productId, "quantity": 1 }] }
+      );
+      assert cart.status == 201;
+
+      let cartId = cart.body["cartId"];
+
+      let order = sut.shop.http.post("/api/orders", { "cartId": cartId });
+      assert order.status == 201;
+    }
+
+    // Pass criterion over the full run; no warmup, so every request counts
+    // (C104). errors.rate() counts HTTP requests, not journeys (C107), so
+    // requests skipped after a failed step are not part of it. A failed
+    // assert here fails the Test (C117).
+    Verify {
+      assert errors.rate() < 2%;
+    }
+  }
+}

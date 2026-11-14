@@ -1,0 +1,66 @@
+// Multi-regional workload: 100 virtual users send GET requests to two
+// regional API endpoints. Each request goes to Europe with 70% probability
+// and to the UnitedStates with 30%. The load ramps linearly from 0 to 100
+// users over 2 minutes, then holds 100 users for 5 minutes.
+//
+// Per request, the engine records status code, latency and outcome
+// (ok, failed, timeout, connectionError, checkFailed) on its own (C104,
+// C105, C130). The summary and the console report show the request metrics
+// per endpoint, that is per target, method and path (C135). The two regions
+// are two targets, so each region gets its own p50, p95, p99 and error rate
+// without any setting.
+//
+// The test only reports. It has no pass criteria and uses check instead of
+// assert, so a failed request counts in the error rates but never fails the
+// Test (C129). The run exits with 0, or with 2 when it cannot run or is
+// aborted (C132).
+
+TestSuite MultiRegionalWorkload {
+  Config {
+    sut {
+      europe       { baseUrl = "http://192.168.178.71:8080"; }
+      unitedStates { baseUrl = "http://192.168.178.72:8080"; }
+    }
+
+    output {
+      // One JSON line per request; target tells the two regions apart
+      // (C120, C122).
+      requests {
+        file   = "results/multi_regional_workload_requests.jsonl";
+        fields = [time, target, status, latency, outcome];
+      }
+      summary = "results/multi_regional_workload_summary.json";   // metrics per endpoint, so per region (C121, C135)
+    }
+  }
+
+  Test RegionalProducts {
+    Load {
+      thinkTime 1s;                 // each user waits after every response (C16)
+      requestTimeout 5s;            // a timeout counts as a failure (C96, C105)
+
+      stages [
+        100vu in  2m,               // linear ramp from 0 to 100 users (C24, C128)
+        100vu for 5m                // hold 100 users
+      ]
+
+      // sut.any picks one of these targets at the start of each iteration,
+      // by these percentages (C32, C36, C168). An iteration here is one
+      // request, so each request picks its region on its own.
+      distribution {
+        europe       70%;
+        unitedStates 30%;
+      }
+    }
+
+    Actions {
+      let response = sut.any.http.get("/api/products");
+
+      // Only 200 is a success. Timeouts and connection errors have
+      // status 0 (C110), so they fail this check too, and keep their own
+      // outcome; an ok request with another status becomes checkFailed.
+      // Every failure counts in errors.rate() of its region (C107, C130,
+      // C135), but a failed check never fails the Test (C129).
+      check response.status == 200;
+    }
+  }
+}

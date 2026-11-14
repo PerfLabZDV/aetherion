@@ -1,0 +1,185 @@
+// Energy-aware performance scenario: an e-commerce API in two regions,
+// Europe and the United States, each a virtual machine on one physical
+// server. Setup checks the search of both regions. Then 100 virtual users run
+// a search, cart and order journey for 10 minutes; each journey goes to
+// Europe with 70% probability and to the United States with 30%. The first
+// 3 minutes ramp from 10 to 100 users and are warm-up, so every result covers
+// only the 7 minutes at 100 users. Cleanup deletes all orders and carts of
+// both regions. The test assumes the regions hold no orders or carts of
+// other runs, since Cleanup deletes every one.
+//
+// Per request, the engine records status code, latency and outcome
+// (ok, failed, timeout, connectionError, assertFailed) on its own (C104,
+// C105, C125). Only Actions requests outside warmup count in the metrics, so
+// Setup, Verify and Cleanup requests and the ramp are left out; the requests
+// file still holds every request with its phase (C120, C167).
+//
+// While the load runs, the engine reads the CPU of both regional machines
+// from node_exporter every 5 seconds and the power of the physical server
+// from every MQTT message (C158, C159, C163). Nothing runs outside PerfLang:
+// the engine reads node_exporter and the MQTT broker itself.
+//
+// At the end of the run the engine prints, and the summary file holds
+// (C121, C131, C135, C161, C176):
+// - request count, latency p50 p95 p99 and error rate per region, per
+//   endpoint and overall;
+// - the CPU mean and max of each region (C160);
+// - power mean and peak, and the total energy of the physical server;
+// - every assert in Verify with its measured value and result, the failed
+//   asserts in Setup and Cleanup, and the result of the Test.
+// The run exits with 0 when the Test passes, with 1 when setup, verification
+// or cleanup fails, and with 2 when it cannot run or is aborted (C132, C155).
+
+TestSuite EnergyAwarePerformanceScenario {
+  Config {
+    sut {
+      // The two regions, each a virtual machine with node_exporter on port
+      // 9100 of its baseUrl host (C156, C159).
+      europe       { baseUrl = "http://192.168.178.71:8080"; metrics = [cpu]; }
+      unitedStates { baseUrl = "http://192.168.178.72:8080"; metrics = [cpu]; }
+
+      // The physical server that hosts both machines. A measured machine is
+      // a target of its own (C156); its only metric comes over MQTT, so it
+      // needs no baseUrl or host (C163). Energy covers this target only, and
+      // the load generator does not count (C161).
+      physicalServer {
+        metrics = [power];
+        topics { power = "power/app-server"; }
+      }
+    }
+
+    monitoring {
+      // node_exporter: http://<region host>:9100/metrics in the Prometheus
+      // text format, read every 5 seconds. cpu is the busy share of the
+      // change in node_cpu_seconds_total between two readings, over all
+      // cores: 100 * (1 - change of idle / change of all modes) (C158, C174).
+      interval = 5s;
+      port     = 9100;
+      format   = prometheus;
+
+      // Every message is a sample, timed by its arrival; power is read from
+      // the field watts of {"ts": ..., "watts": ...} (C163). energy.total()
+      // integrates the samples after warmup with the trapezoid rule and
+      // subtracts no baseline (C161, C162).
+      mqtt {
+        broker = "mqtt://192.168.178.175:1883";
+        fields { power = "watts"; }
+      }
+    }
+
+    output {
+      // One JSON line per request in every phase: phase and status show the
+      // result of each Setup and Cleanup request, target its region (C120,
+      // C122).
+      requests {
+        file   = "results/energy_aware_performance_scenario_requests.jsonl";
+        fields = [time, phase, target, method, url, status, latency, outcome];
+      }
+
+      // Every CPU and power sample with its time (C173).
+      samples { file = "results/energy_aware_performance_scenario_samples.jsonl"; }
+
+      summary = "results/energy_aware_performance_scenario_summary.json";   // metrics per region and endpoint, CPU, power, energy, asserts (C121, C176)
+    }
+  }
+
+  Test ShoppingJourney {
+    Load {
+      thinkTime 1s;                 // each user waits after every response (C16)
+      requestTimeout 5s;            // every request in every phase; a timeout counts as a failure (C96, C105)
+
+      // The ramp is the first part of the stages: requests, CPU, power and
+      // energy count only from minute 3 on (C162, C167).
+      warmup 3m;
+
+      stages [
+        10vu  now,                  // start at once with 10 users (C127)
+        100vu in  3m,               // linear ramp to 100 users (C24)
+        100vu for 7m                // hold 100 users
+      ]
+
+      // sut.any picks one region at the start of each iteration, by these
+      // percentages, and keeps it for the whole journey (C32, C168).
+      distribution {
+        europe       70%;
+        unitedStates 30%;
+      }
+    }
+
+    // Runs once, before the load and outside the metrics (C104). A failed
+    // assert here skips Actions and Verify, fails the Test, and Cleanup
+    // still runs (C116, C117).
+    Setup {
+      for region in [sut.europe, sut.unitedStates] {
+        for term in ["laptop", "phone", "camera", "headphones", "monitor"] {
+          let search = region.http.get("/api/search", { "query": { "q": term } });
+          assert search.status == 200;
+          assert search.body["products"].length() >= 1;
+        }
+      }
+    }
+
+    // One iteration is one journey (C103). Timeouts and connection errors
+    // have status 0 (C110), so they fail the asserts too and keep their own
+    // outcome (C105). A failed assert ends the journey, the user starts a
+    // new one, and the failure counts in errors.rate() of its region; Verify
+    // decides the result (C116, C117, C125, C176).
+    Actions {
+      let region = sut.any;
+
+      // query adds ?q=<term> (C115). The query is not part of the endpoint,
+      // so every term counts in one endpoint per region (C135).
+      let term = ["laptop", "phone", "camera", "headphones", "monitor"].random();
+      let search = region.http.get("/api/search", { "query": { "q": term } });
+      assert search.status == 200;
+
+      // An empty products list leaves no item to pick: a failed assert with
+      // no value, which ends the journey like any other (C134, C141).
+      let productId = search.body["products"].random()["id"];
+
+      // A JSON body is sent with Content-Type: application/json (C123).
+      let cart = region.http.post("/api/carts", { "items": [{ "productId": productId, "quantity": 1 }] });
+      assert cart.status == 201;
+
+      let order = region.http.post("/api/orders", { "cartId": cart.body["cartId"] });
+      assert order.status == 201;
+    }
+
+    // Runs once after the load, over the 7 minutes after warmup (C104,
+    // C167). Every assert is evaluated and reported with its value, and a
+    // failed one fails the Test, so the run exits with 1 (C116, C117, C132).
+    // Skipped when the run is aborted (C155).
+    Verify {
+      // Separately for each region: only the requests sent to it (C176).
+      // A region that got no requests has no value and fails.
+      assert sut.europe.latency.p95()       < 300ms;
+      assert sut.europe.errors.rate()       < 1%;
+      assert sut.unitedStates.latency.p95() < 300ms;
+      assert sut.unitedStates.errors.rate() < 1%;
+
+      // Was the measurement valid? A metric with no sample after warmup has
+      // no value, so its assert fails and the report names the target and
+      // its sample count (C141, C164).
+      assert sut.physicalServer.power.mean() > 0W;   // MQTT power data arrived
+      assert sut.europe.cpu.mean()           >= 0%;  // node_exporter CPU data arrived
+      assert sut.unitedStates.cpu.mean()     >= 0%;
+    }
+
+    // Runs once the Test has started, after failed requests, a failed Verify
+    // or an interrupt (C155), and outside the metrics (C104). It needs no
+    // value from the other phases, so it also works when Actions or Verify
+    // did not run. Orders go first, since they refer to carts. Every request
+    // runs, and a failed assert fails the Test (C116, C117).
+    Cleanup {
+      let europeOrders = sut.europe.http.delete("/api/orders");
+      assert europeOrders.status == 200;
+      let europeCarts = sut.europe.http.delete("/api/carts");
+      assert europeCarts.status == 200;
+
+      let usOrders = sut.unitedStates.http.delete("/api/orders");
+      assert usOrders.status == 200;
+      let usCarts = sut.unitedStates.http.delete("/api/carts");
+      assert usCarts.status == 200;
+    }
+  }
+}

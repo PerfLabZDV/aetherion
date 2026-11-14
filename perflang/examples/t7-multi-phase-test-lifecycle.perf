@@ -1,0 +1,99 @@
+// Multi-phase test lifecycle: Setup loads the product catalog, Actions
+// creates 20 carts with 20 virtual users starting at once, Verify checks that
+// the API holds exactly those 20 carts, and Cleanup deletes all carts again.
+// The test assumes the API holds no carts when it starts, since Verify
+// counts every cart and Cleanup deletes every cart.
+//
+// Per request, the engine records status code, latency and outcome
+// (ok, failed, timeout, connectionError, assertFailed) on its own (C104,
+// C105, C125). Only Actions requests count in the metrics, so latency and
+// error rate cover the action phase only; the requests file still holds the
+// Setup, Verify and Cleanup requests with their phase (C120).
+//
+// At the end of the run the engine prints the asserts in Verify with their
+// result, the failed asserts in the other phases, latency, error rate and the
+// other request metrics for each endpoint (C131, C135), and the result of the
+// Test. The summary file holds the same (C121). The run exits with 0 when the
+// Test passes, 1 when verification or cleanup fails, and 2 when it cannot run
+// or is aborted (C132, C155).
+
+TestSuite MultiPhaseTestLifecycle {
+  Config {
+    sut {
+      cartApi { baseUrl = "http://192.168.178.71:8080"; }
+    }
+
+    output {
+      // One JSON line per request in every phase: phase and status show the
+      // result of each Setup, Verify and Cleanup request (C120, C122).
+      requests {
+        file   = "results/multi_phase_test_lifecycle_requests.jsonl";
+        fields = [time, phase, method, url, status, latency, outcome];
+      }
+      summary = "results/multi_phase_test_lifecycle_summary.json";   // metrics per endpoint, asserts, result (C121, C135)
+    }
+  }
+
+  Test CartLifecycle {
+    Load {
+      // No thinkTime: the default is 0ms, no wait between requests (C16).
+      requestTimeout 5s;            // every request in every phase; a timeout counts as a failure (C96, C105)
+
+      // 20 users, all starting at once (C128), and one iteration for each
+      // user, so each user creates exactly one cart (C103, C175).
+      stages [ 20vu for 1iter/vu ]
+    }
+
+    // Runs once, before the load and outside the metrics (C104). A failed
+    // assert here skips Actions and Verify, fails the Test, and Cleanup
+    // still runs (C116, C117).
+    Setup {
+      let products = sut.cartApi.http.get("/api/products");
+      assert products.status == 200;
+
+      // One value shared by all virtual users (C136, C137).
+      let availableProducts = products.body["products"];
+
+      // random(5) needs 5 products (C134): fail here once with a clear
+      // message instead of in each of the 20 iterations.
+      assert availableProducts.length() >= 5;
+    }
+
+    // One iteration is one cart (C103). Timeouts and connection errors have
+    // status 0 (C110), so they fail the assert too and keep their own
+    // outcome (C105). A failed assert ends the iteration and counts in
+    // errors.rate(), but Verify decides the result (C116, C117, C125).
+    Actions {
+      // 5 distinct products, picked anew in every iteration (C134).
+      let picked = availableProducts.random(5);
+
+      // A JSON body is sent with Content-Type: application/json (C123).
+      let cart = sut.cartApi.http.post(
+        "/api/carts",
+        { "items": picked.map(\p -> { "productId": p["id"], "quantity": 1 }) }
+      );
+      assert cart.status == 201;
+    }
+
+    // Runs once after the load; its request is not part of the metrics
+    // (C104). Every assert is evaluated and reported, and a failed one fails
+    // the Test, so the run exits with 1 (C116, C117, C132). Skipped when the
+    // run is aborted (C155).
+    Verify {
+      let carts = sut.cartApi.http.get("/api/carts");
+      assert carts.status == 200;
+      assert carts.body["carts"].length() == 20;
+    }
+
+    // Runs once the Test has started, after failed requests, a failed Verify
+    // or an interrupt (C155), and outside the metrics (C104). It needs no
+    // value from the other phases, so it also works when Actions or Verify
+    // did not run. A failed assert fails the Test (C117): carts left behind
+    // would break the next run.
+    Cleanup {
+      let deleted = sut.cartApi.http.delete("/api/carts");
+      assert deleted.status == 200;
+      assert deleted.body["deleted"] == 20;
+    }
+  }
+}

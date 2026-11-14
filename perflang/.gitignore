@@ -1,0 +1,6 @@
+/_build/
+/deps/
+*.ez
+erl_crash.dump
+/src/perflang_lexer.erl
+/src/perflang_parser.erl
