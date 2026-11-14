@@ -1,14 +1,14 @@
 #!/bin/sh
-# Runs a PerfLang suite, as `mix perflang run`, and turns Ctrl+C into a clean stop.
+# Runs a PerfLang suite, as `mix aetherion run`, and turns Ctrl+C into a clean stop.
 #
 # The Erlang VM cannot catch SIGINT, so a plain Ctrl+C would open its break menu
 # and skip Cleanup (C155). This keeps the VM from seeing it and sends SIGTERM,
 # which the engine handles. Paths stay relative to the working directory (C119).
-export PERFLANG_CWD="$PWD"
+export AETHERION_CWD="$PWD"
 export ELIXIR_ERL_OPTIONS="+Bi"
 cd "$(dirname "$0")/.." || exit 2
 
-mix perflang "$@" &
+mix aetherion "$@" &
 pid=$!
 trap 'kill -TERM "$pid" 2>/dev/null' INT TERM
 

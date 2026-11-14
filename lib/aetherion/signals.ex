@@ -2,7 +2,7 @@ defmodule Aetherion.Signals do
   @moduledoc """
   Turns SIGTERM into a message to the run, so that Cleanup still runs (C155).
 
-  The Erlang VM does not let a program catch SIGINT. `bin/perflang` turns Ctrl+C
+  The Erlang VM does not let a program catch SIGINT. `bin/aetherion` turns Ctrl+C
   into SIGTERM, so a terminal gets the same behaviour.
   """
 

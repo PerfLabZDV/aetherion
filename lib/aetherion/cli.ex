@@ -1,12 +1,12 @@
 defmodule Aetherion.CLI do
   @moduledoc """
-  `perflang run file.perf [--config staging.perfcfg] [--seed 42] [--runs 10]` (C165, C178).
+  `aetherion run file.perf [--config staging.perfcfg] [--seed 42] [--runs 10]` (C165, C178).
 
   Returns the exit code of C132: 0 when every Test passed, 1 when a Test failed,
   2 when the run could not start or finish.
   """
 
-  @usage "usage: mix perflang run file.perf [--config file.perfcfg] [--seed n] [--runs n]"
+  @usage "usage: mix aetherion run file.perf [--config file.perfcfg] [--seed n] [--runs n]"
 
   def main(["run" | args]) do
     case OptionParser.parse(args, strict: [config: :string, seed: :integer, runs: :integer]) do
