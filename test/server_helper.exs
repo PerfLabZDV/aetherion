@@ -132,8 +132,8 @@ end
 defmodule Aetherion.TestBroker do
   @moduledoc "Just enough of an MQTT 3.1.1 broker for the engine tests: CONNECT, SUBSCRIBE and publishing to clients."
 
-  def start do
-    {:ok, listen} = :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
+  def start(port \\ 0) do
+    {:ok, listen} = :gen_tcp.listen(port, [:binary, packet: :raw, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listen)
     clients = :ets.new(:mqtt_clients, [:public, :bag])
     pid = spawn(fn -> accept(listen, clients) end)
@@ -143,6 +143,12 @@ defmodule Aetherion.TestBroker do
   def stop(broker) do
     Process.exit(broker.pid, :kill)
     :gen_tcp.close(broker.listen)
+  end
+
+  @doc "Closes the connection of every client, as a broker that restarts does."
+  def drop_clients(broker) do
+    for {_topic, socket} <- :ets.tab2list(broker.clients), do: :gen_tcp.close(socket)
+    :ets.delete_all_objects(broker.clients)
   end
 
   def subscribed?(broker, topic), do: :ets.lookup(broker.clients, topic) != []

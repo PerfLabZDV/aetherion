@@ -382,26 +382,49 @@ defmodule Aetherion.Monitor do
     end
   end
 
+  # A lost connection is opened again at once, then every @mqtt_retry ms until
+  # the Test ends. The session is clean, so messages sent in between are lost
+  # rather than delivered late with a wrong arrival time.
+  @mqtt_retry 1000
+
   defp mqtt_start(monitor, topics, parent, ref) do
     Process.flag(:trap_exit, true)
     {:ok, _started} = Application.ensure_all_started(:emqtt)
     :logger.set_application_level(:emqtt, :warning)
     settings = monitor.rt.monitoring.mqtt
+
+    case mqtt_connect(settings, Map.keys(topics)) do
+      {:ok, client} ->
+        send(parent, {ref, :ok})
+        mqtt_loop(%{monitor: monitor, settings: settings, topics: topics, client: client})
+
+      {:error, reason} ->
+        send(parent, {ref, {:error, reason}})
+    end
+  end
+
+  # Keepalive is 10 s, so a broker that stops answering is noticed within 15 s.
+  defp mqtt_connect(settings, topics) do
     uri = URI.parse(settings.broker)
 
-    with {:ok, client} <-
-           :emqtt.start_link(
-             host: String.to_charlist(uri.host),
-             port: uri.port || 1883,
-             proto_ver: :v4,
-             clean_start: true
-           ),
-         {:ok, _properties} <- :emqtt.connect(client),
-         :ok <- subscribe(client, Map.keys(topics), settings.qos) do
-      send(parent, {ref, :ok})
-      mqtt_loop(monitor, client, topics, settings.fields)
-    else
-      {:error, reason} -> send(parent, {ref, {:error, reason}})
+    options = [
+      host: String.to_charlist(uri.host),
+      port: uri.port || 1883,
+      proto_ver: :v4,
+      clean_start: true,
+      keepalive: 10,
+      connect_timeout: 5
+    ]
+
+    with {:ok, client} <- :emqtt.start_link(options) do
+      with {:ok, _properties} <- :emqtt.connect(client),
+           :ok <- subscribe(client, topics, settings.qos) do
+        {:ok, client}
+      else
+        {:error, reason} ->
+          Process.exit(client, :kill)
+          {:error, reason}
+      end
     end
   end
 
@@ -414,25 +437,40 @@ defmodule Aetherion.Monitor do
     end)
   end
 
-  defp mqtt_loop(monitor, client, topics, fields) do
+  defp mqtt_loop(%{client: client} = mqtt) do
     receive do
       :perflang_stop ->
-        :emqtt.disconnect(client)
+        if client, do: :emqtt.disconnect(client)
+
+      {:EXIT, ^client, _reason} ->
+        send(self(), :perflang_reconnect)
+        mqtt_loop(%{mqtt | client: nil})
+
+      :perflang_reconnect ->
+        case mqtt_connect(mqtt.settings, Map.keys(mqtt.topics)) do
+          {:ok, client} ->
+            mqtt_loop(%{mqtt | client: client})
+
+          {:error, _reason} ->
+            Process.send_after(self(), :perflang_reconnect, @mqtt_retry)
+            mqtt_loop(mqtt)
+        end
 
       # A retained message is an old value, replayed on subscribing (C163).
       {:publish, %{retain: true}} ->
-        mqtt_loop(monitor, client, topics, fields)
+        mqtt_loop(mqtt)
 
       {:publish, %{topic: topic, payload: payload}} ->
-        with {target, metric} <- topics[topic],
-             value when is_number(value) <- mqtt_value(payload, fields[metric]) do
-          store(monitor, target, metric, value)
+        with {target, metric} <- mqtt.topics[topic],
+             value when is_number(value) <- mqtt_value(payload, mqtt.settings.fields[metric]) do
+          store(mqtt.monitor, target, metric, value)
         end
 
-        mqtt_loop(monitor, client, topics, fields)
+        mqtt_loop(mqtt)
 
+      # The exit of a client given up on, and emqtt's other messages.
       _other ->
-        mqtt_loop(monitor, client, topics, fields)
+        mqtt_loop(mqtt)
     end
   end
 

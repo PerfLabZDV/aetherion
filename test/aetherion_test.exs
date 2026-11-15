@@ -1700,7 +1700,7 @@ defmodule AetherionTest do
           }
         }
         Test T {
-          Load { thinkTime 10ms; stages [ 1vu for 400ms ] }
+          Load { thinkTime 10ms; stages [ 1vu for #{opts[:duration] || "400ms"} ] }
           Setup { sleep(50ms); }
           Actions { sut.api.http.get("/"); }
           Verify { #{verify} }
@@ -1787,6 +1787,48 @@ defmodule AetherionTest do
 
       assert output =~ "  plug power no value (0 samples)"
       assert output =~ "  plug energy no value (mqtt, 0 samples)"
+    end
+
+    test "a dropped connection is opened again, and subscribes again" do
+      broker = broker()
+      api = server(fn _ -> 200 end)
+
+      spawn(fn ->
+        wait_for_subscription(broker)
+        Process.sleep(100)
+        TestBroker.publish(broker, "tele/plug/SENSOR", tasmota(100))
+        Process.sleep(50)
+        TestBroker.drop_clients(broker)
+        wait_for_subscription(broker)
+        TestBroker.publish(broker, "tele/plug/SENSOR", tasmota(200))
+      end)
+
+      verify = "assert sut.plug.power.max() == 200W; assert sut.plug.power.mean() == 150W;"
+      result = run(mqtt_suite(api, broker, verify, duration: "600ms"))
+      assert result.exit_code == 0, inspect(hd(tests(result)).verify)
+    end
+
+    test "a broker that goes down is tried again until it is back" do
+      broker = broker()
+      api = server(fn _ -> 200 end)
+      parent = self()
+
+      spawn(fn ->
+        wait_for_subscription(broker)
+        Process.sleep(100)
+        TestBroker.drop_clients(broker)
+        TestBroker.stop(broker)
+        Process.sleep(300)
+        broker = TestBroker.start(broker.port)
+        send(parent, {:restarted, broker})
+        wait_for_subscription(broker)
+        TestBroker.publish(broker, "tele/plug/SENSOR", tasmota(100))
+      end)
+
+      result = run(mqtt_suite(api, broker, "assert sut.plug.power.max() == 100W;", duration: "1800ms"))
+      assert_received {:restarted, restarted}
+      TestBroker.stop(restarted)
+      assert result.exit_code == 0, inspect(hd(tests(result)).verify)
     end
 
     test "a broker that cannot be reached ends the run with exit code 2" do

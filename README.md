@@ -38,7 +38,7 @@ bin/aetherion                  the same command, and a clean stop on Ctrl+C
 rel/vm.args.eex                flags of the Erlang VM of the release
 packaging/debian/              the Debian 13 package: build.sh, and the files it installs
 packaging/ansible/             deploy.yml, which installs the package on main servers and workers
-test/                          509 tests; fixtures/full_suite.perf holds every example from the EBNF,
+test/                          511 tests; fixtures/full_suite.perf holds every example from the EBNF,
                                server_helper.exs a local HTTP server and MQTT broker for the engine tests, and
                                cluster_test.exs runs suites on worker nodes on this machine
 examples/                      example suites, e.g. t1-basic-http-get-req.perf, and staging.perfcfg, an external
@@ -290,6 +290,11 @@ monitoring {
 `fields` maps a metric to a dotted path in a JSON message; without one the message is a plain number. Power arrives in
 watts. A Tasmota plug publishes every `TelePeriod` seconds, 300 by default and 10 at least, so set it low enough to
 get several samples in a test.
+
+A lost connection to the broker is opened again at once, then every second until the Test ends, and the topics are
+subscribed again. A broker that stops answering is noticed within 15 seconds (keepalive 10s). The session is clean, so
+messages published in between are lost, not delivered late with a wrong arrival time; energy integrates over the gap as
+over any other time between samples. Only the first connection must succeed for the run to start.
 
 A selector narrows a metric: `cpu[0, 1]` by logical core, `gpu[2]` by device id, `disk["nvme0n1"]` by device name.
 Readings then cover only those devices.
