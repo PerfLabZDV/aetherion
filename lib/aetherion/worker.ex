@@ -3,17 +3,19 @@ defmodule Aetherion.Worker do
   A worker: a node that runs virtual users for a main server (`Aetherion.Cluster`).
 
   `aetherion worker --name worker1@10.0.0.11` starts one and waits. For each Test,
-  the main server starts a session here. The session runs its share of the users
-  with the same code as a run on one machine (`Aetherion.Load`), records into a
-  recorder of its own, and sends the requests that count every 200ms. When the
-  main server stops it, the session stops its users, waits for their last
-  requests, sends the rest and ends. A session whose main server goes away stops
-  its users at once.
+  the main server starts a session here. The session runs its share of the users,
+  and its part of a stage with a count, with the same code as a run on one machine
+  (`Aetherion.Load`). It records into a recorder of its own, on the main server's
+  window, and every 50ms sends the requests that count and how far its part of a
+  count stage is. When the main server stops it, the session stops its users,
+  waits for their last requests, sends the rest and ends. Every time it sends is
+  on the main server's clock. A session whose main server goes away stops its
+  users at once.
   """
 
   alias Aetherion.{Cluster, Load, Recorder}
 
-  @forward_ms 200
+  @forward_ms 50
   @ready {__MODULE__, :ready}
 
   @doc "Starts the node `name` with `cookie` and serves main servers until the VM stops."
@@ -38,16 +40,12 @@ defmodule Aetherion.Worker do
   def ready?, do: :persistent_term.get(@ready, false)
 
   @doc false
-  # Called by the main server. main_now is its clock when it called, so the
-  # request attempts sent back can be put on that clock.
-  def start_session(controller, job, main_now) do
-    offset = main_now - Recorder.now()
-    spawn(fn -> session(controller, job, offset) end)
-  end
+  # Called by the main server, with job.offset_ms, how far its clock is ahead of this one.
+  def start_session(controller, job), do: spawn(fn -> session(controller, job) end)
 
-  defp session(controller, job, offset) do
+  defp session(controller, job) do
     recorder = Recorder.new(outbox: true)
-    Recorder.start_window(recorder, job.warmup_left_ms)
+    Recorder.join_window(recorder, job.marks, job.offset_ms)
 
     # The lists of Setup, copied into a table here, so users can read them and add to them.
     cells = :ets.new(:cells, [:ordered_set, :public])
@@ -73,8 +71,11 @@ defmodule Aetherion.Worker do
       cells: cells,
       vars: vars,
       copied: MapSet.new(job.cells, &elem(&1, 0)),
-      offset: offset,
-      requests?: job.requests?
+      offset: job.offset_ms,
+      requests?: job.requests?,
+      # The main server's number of the open count stage, and the last progress sent.
+      stage: nil,
+      sent: nil
     }
 
     Process.send_after(self(), :forward, @forward_ms)
@@ -86,8 +87,14 @@ defmodule Aetherion.Worker do
       {:users, target} ->
         loop(%{state | users: Load.resize(state.users, target)})
 
+      {:count, stage, users, part, per_user} ->
+        loop(%{state | users: Load.open(state.users, users, part, per_user), stage: stage})
+
+      :free ->
+        loop(%{state | users: Load.free(state.users), stage: nil})
+
       :forward ->
-        forward(state)
+        state = forward(state)
         Process.send_after(self(), :forward, @forward_ms)
         loop(state)
 
@@ -105,11 +112,16 @@ defmodule Aetherion.Worker do
     end
   end
 
+  # Sends only when there is something new: requests, or progress in a count stage.
   defp forward(state) do
-    case Recorder.take_counted(state.recorder) do
-      [] -> :ok
-      rows -> send(state.controller, {:aetherion_counted, rows})
+    rows = Recorder.take_counted(state.recorder)
+    progress = if state.stage, do: Map.put(Load.progress(state.users), :stage, state.stage)
+
+    if rows != [] or progress != state.sent do
+      send(state.controller, {:aetherion_progress, self(), Map.put(progress || %{stage: nil}, :rows, rows)})
     end
+
+    %{state | sent: progress}
   end
 
   defp finish(state) do
@@ -118,7 +130,7 @@ defmodule Aetherion.Worker do
     result = %{
       counted: Recorder.take_counted(state.recorder),
       recorder: Recorder.export(state.recorder, state.offset, state.requests?),
-      vars: :ets.tab2list(state.vars),
+      vars: for({name, value, at} <- :ets.tab2list(state.vars), do: {name, value, at + state.offset}),
       cell_adds: for({key, _value} = row <- :ets.tab2list(state.cells), key not in state.copied, do: row)
     }
 

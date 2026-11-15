@@ -80,9 +80,19 @@ defmodule Aetherion.Recorder do
 
   def warmup?(recorder), do: System.monotonic_time(:microsecond) < :atomics.get(recorder.clock, @warmup_end)
 
-  @doc "Milliseconds of warmup still to come, for a worker that joins the window now."
-  def warmup_left(recorder),
-    do: max(:atomics.get(recorder.clock, @warmup_end) - System.monotonic_time(:microsecond), 0) / 1000
+  @doc "Where the window starts and warmup ends, in microseconds on this node's monotonic clock."
+  def window_marks(recorder),
+    do: {:atomics.get(recorder.clock, @window_start), :atomics.get(recorder.clock, @warmup_end)}
+
+  @doc """
+  Opens the window of a worker at the main server's `marks` (`window_marks/1` there),
+  `offset_ms` being how far the main server's clock is ahead of this one.
+  """
+  def join_window(recorder, {start, warmup_end}, offset_ms) do
+    offset = round(offset_ms * 1000)
+    :atomics.put(recorder.clock, @window_start, start - offset)
+    :atomics.put(recorder.clock, @warmup_end, warmup_end - offset)
+  end
 
   @doc "The measured window on the monotonic clock, in milliseconds: Actions outside warmup (C162)."
   def window(recorder) do

@@ -20,7 +20,7 @@ defmodule Aetherion do
   """
 
   alias PerfLang.AST
-  alias Aetherion.{Cluster, Http, Interpreter, Load, Monitor, Recorder, Report, Signals, Stats, Values}
+  alias Aetherion.{Http, Interpreter, Load, Monitor, Recorder, Report, Signals, Stats, Values}
 
   @phase_limit :timer.minutes(5)
 
@@ -35,11 +35,6 @@ defmodule Aetherion do
         {:ok, plan} -> plan
         {:error, message} -> raise ArgumentError, message
       end
-
-    with [_ | _] <- opts[:workers] || [],
-         {:error, errors} <- Cluster.check(ast) do
-      raise ArgumentError, Enum.map_join(errors, "\n", &PerfLang.Error.format/1)
-    end
 
     seed = opts[:seed] || :rand.uniform(2_147_483_647)
     started_at = DateTime.utc_now()
@@ -311,7 +306,7 @@ defmodule Aetherion do
     actions =
       Map.new(ctx.test.tracked, fn name ->
         case :ets.lookup(ctx.test.vars, name) do
-          [{^name, value}] -> {name, value}
+          [{^name, value, _at}] -> {name, value}
           [] -> {name, :unset}
         end
       end)

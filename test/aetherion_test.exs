@@ -642,6 +642,18 @@ defmodule AetherionTest do
       assert totals(result).errors.count == 0
     end
 
+    test "a ramp by iterations from or to 0 users runs every iteration (C103)" do
+      server = server(fn _ -> {:sleep, 2, 200} end)
+      up = suite(server, load: "stages [ 3vu in 30iter ]", actions: ~S|sut.api.http.get("/up");|)
+      down = suite(server, load: "stages [ 4vu now, 0vu in 30iter ]", actions: ~S|sut.api.http.get("/down");|)
+
+      for {source, path} <- [{up, "/up"}, {down, "/down"}] do
+        task = Task.async(fn -> run(source) end)
+        assert {:ok, %{exit_code: 0}} = Task.yield(task, 10_000) || Task.shutdown(task, :brutal_kill)
+        assert Enum.count(TestServer.requests(server), &(&1.path == path)) == 30
+      end
+    end
+
     test "no stages is one user and one iteration (C124)" do
       server = server(fn _ -> 200 end)
       assert totals(run(suite(server, actions: ~S|sut.api.http.get("/");|))).requests == 1

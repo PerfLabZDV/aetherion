@@ -33,7 +33,7 @@ lib/aetherion/worker.ex        a worker, and its sessions of virtual users
 lib/aetherion/cli.ex           the command line, and its exit codes
 lib/mix/tasks/aetherion.ex     mix aetherion run
 bin/aetherion                  the same command, and a clean stop on Ctrl+C
-test/                          492 tests; fixtures/full_suite.perf holds every example from the EBNF,
+test/                          497 tests; fixtures/full_suite.perf holds every example from the EBNF,
                                server_helper.exs a local HTTP server and MQTT broker for the engine tests, and
                                cluster_test.exs runs suites on worker nodes on this machine
 examples/                      example suites, e.g. t1-basic-http-get-req.perf, and staging.perfcfg, an external
@@ -94,25 +94,33 @@ bin/aetherion run shop.perf --config staging.perfcfg --workers worker1@10.0.0.11
 
 With `stages [ 2000vu for 5m ]` and three workers, each runs 667 users, the first one more. Users are numbered
 across the workers, so `virtualUser` in the requests file stays unique. The workers send the requests that count every
-200ms, so stopIf and the console report see all of them, and percentiles stay exact (C172). When the stages end,
+50ms, so stopIf and the console report see all of them, and percentiles stay exact (C172). When the stages end,
 each worker stops its users, waits for their last requests and sends what it recorded; Verify starts after that.
+
+A stage with a count splits its iterations once, when it opens, in proportion to the users: `5vu for 41iter` on two
+workers is 3 users with 25 iterations and 2 users with 16 (C103). The stage ends when every worker has finished its
+part, so a slow worker cannot hand iterations to a fast one, as a slow user can on one machine. With `iter/vu` each
+user runs its own count wherever it runs (C175). During a ramp by iterations, users go first to the workers that
+still have iterations to finish.
+
+Each worker measures on the main server's clock: when a Test starts, the main server measures how far each worker's
+clock is from its own, so warmup ends at the same moment everywhere, the requests file is in time order across
+workers, and Verify reads an Actions variable from the iteration that set it last, on any worker (C136).
 
 The nodes talk over Erlang distribution: port 4369 (epmd) and one port per node, which can be fixed for a firewall
 with `ELIXIR_ERL_OPTIONS="-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100"`. The cookie is the only check
-and nothing is encrypted, so keep the nodes on a private network or a VPN such as WireGuard. `--name main@10.0.0.10` names the main server's node; by default
-it is named after the address that reaches the first worker. `--cookie` works too, but shows in the process list.
+and nothing is encrypted, so keep the nodes on a private network or a VPN such as WireGuard. `--name main@10.0.0.10`
+names the main server's node; by default it is named after the address that reaches the first worker. `--cookie` works
+too, but shows in the process list.
 
 A worker that goes away ends the run with exit code 2, as a run that cannot finish (C132), and the other workers stop
 their users. Ctrl+C on the main server stops the users on every worker, and Cleanup runs (C155). Workers stay up for
 the next run.
 
-Not on workers yet:
+Not across workers:
 
-* Stages that count iterations (`iter`, `iter/vu`) and a Load without stages: the run refuses to start.
 * An `add` from Actions to a list of Setup (C137) reaches Verify and Cleanup, but not the users of other workers during
   the run.
-* An Actions variable that Verify reads (C136) comes from the worker that reported last.
-* Each worker starts its warmup when the main server starts it, so warmup ends a network delay later there.
 * `loadGenerator.cpu` and `loadGenerator.mem` read the main server, which sends no load.
 
 ## Usage

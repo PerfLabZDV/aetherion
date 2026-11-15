@@ -8,23 +8,22 @@ defmodule Aetherion.Cluster do
   Erlang distribution, with long names and a shared cookie.
 
   For each Test the main server starts a session on every worker
-  (`Aetherion.Worker`) and splits each user count across them, the first workers
-  taking one more when it does not divide evenly. A worker sends the requests
-  that count every 200ms, so stopIf and the metrics read here see every worker.
-  When the stages end, each worker stops its users, waits for their requests, and
-  sends the rest: its asserts, checks and failures, its request attempts for the
+  (`Aetherion.Worker`), gives it the measured window on the worker's own clock,
+  and splits each user count across the workers, the first ones taking one more
+  when it does not divide evenly. A stage with a count splits its iterations
+  when it opens, in proportion to the users; it ends when every worker has
+  finished its part. A worker sends the requests that count and its progress
+  every 50ms, so stopIf and the metrics read here see every worker. When the
+  stages end, each worker stops its users, waits for their requests, and sends
+  the rest: its asserts, checks and failures, its request attempts for the
   requests file, the Actions variables Verify and Cleanup read (C136), and what
   its users added to the lists of Setup (C137).
 
-  Not yet across workers: stages that count iterations (`iter`, `iter/vu`), which
-  `check/1` rejects. An `add` from Actions reaches Verify and Cleanup, but not the
-  users of other workers during the run. The Actions variable Verify reads comes
-  from the worker that reported last. Each worker starts its warmup when it
-  joins, so warmup ends a network delay later there. `loadGenerator` reads the
-  main server, which sends no load.
+  Not across workers: an `add` from Actions reaches Verify and Cleanup, but not
+  the users of other workers during the run, and `loadGenerator` reads the main
+  server, which sends no load.
   """
 
-  alias PerfLang.AST
   alias Aetherion.Recorder
 
   # ---------- Connecting ----------
@@ -182,59 +181,22 @@ defmodule Aetherion.Cluster do
     |> :erlang.phash2()
   end
 
-  # ---------- What runs on workers ----------
-
-  @doc """
-  The parts of a suite workers cannot run yet: stages that count iterations, and a
-  Load without stages, which runs one iteration (C103).
-  """
-  def check(%AST.TestSuite{} = ast) do
-    errors =
-      for test <- ast.tests,
-          load = test.load || ast.load,
-          error <- load_errors(test, load),
-          do: error
-
-    if errors == [], do: :ok, else: {:error, Enum.uniq(errors)}
-  end
-
-  defp load_errors(%AST.Test{name: name, loc: loc}, nil),
-    do: [error(loc, "Test #{name} has no Load; on workers every stage needs a time, such as 10vu for 5m")]
-
-  defp load_errors(%AST.Test{name: name}, %AST.Load{settings: settings, loc: loc}) do
-    case Enum.find(settings, &match?(%AST.Stages{}, &1)) do
-      nil ->
-        [error(loc, "Test #{name} has no stages; on workers every stage needs a time, such as 10vu for 5m")]
-
-      %AST.Stages{stages: stages} ->
-        for %{duration: %AST.IterationsLiteral{}, loc: loc} <- stages do
-          error(
-            loc,
-            "stages that count iterations do not run on workers yet; give the stage a time, such as 5m"
-          )
-        end
-    end
-  end
-
-  defp error({line, column}, message),
-    do: %PerfLang.Error{stage: :workers, message: message, line: line, column: column}
-
-  defp error(nil, message), do: error({1, 1}, message)
-
   # ---------- One Test ----------
 
-  @doc "Starts a session on every worker, for the Actions of the Test in `ctx`."
+  @doc """
+  Starts a session on every worker, for the Actions of the Test in `ctx`. Each worker
+  gets the window of this node on its own clock, from the offset between the two.
+  """
   def start(workers, ctx) do
     test = ctx.test
-    count = length(workers)
 
     job = %{
       ctx: %{ctx | test: %{test | recorder: nil, monitor: nil, cells: nil, vars: nil}},
       cells: :ets.tab2list(test.cells),
       cells_table: test.cells,
       requests?: ctx.rt.output.requests != nil,
-      warmup_left_ms: Recorder.warmup_left(test.recorder),
-      step: count
+      marks: Recorder.window_marks(test.recorder),
+      step: length(workers)
     }
 
     sessions =
@@ -242,9 +204,11 @@ defmodule Aetherion.Cluster do
       |> Enum.with_index(1)
       |> Enum.reduce([], fn {node, index}, started ->
         try do
-          job = Map.put(job, :first, index)
-          pid = :erpc.call(node, Aetherion.Worker, :start_session, [self(), job, Recorder.now()])
-          started ++ [%{node: node, pid: pid, ref: Process.monitor(pid), users: 0}]
+          job = Map.merge(job, %{first: index, offset_ms: offset(node)})
+          pid = :erpc.call(node, Aetherion.Worker, :start_session, [self(), job])
+
+          started ++
+            [%{node: node, pid: pid, ref: Process.monitor(pid), users: 0, budget: 0, done: 0, left: 0}]
         catch
           kind, reason ->
             abort(%{sessions: started})
@@ -252,23 +216,118 @@ defmodule Aetherion.Cluster do
         end
       end)
 
-    %{sessions: sessions}
+    # stage numbers the count stages, so a late report from an earlier one is not counted.
+    %{sessions: sessions, stage: 0, counting: false}
   end
 
-  @doc "Splits `target` users across the workers, and tells each worker whose share changed."
+  # How far this node's monotonic clock is ahead of the worker's, in milliseconds,
+  # from the shortest of a few round trips: the worker read its clock about halfway.
+  defp offset(node) do
+    1..5
+    |> Enum.map(fn _n ->
+      sent = Recorder.now()
+      there = :erpc.call(node, Recorder, :now, [])
+      back = Recorder.now()
+      {back - sent, (sent + back) / 2 - there}
+    end)
+    |> Enum.min_by(&elem(&1, 0))
+    |> elem(1)
+  end
+
+  @doc """
+  Splits `target` users across the workers, and tells each worker whose share changed.
+  The first workers take one more when it does not divide evenly. In a stage with a
+  count, the workers that have iterations left to finish come first, so a ramp by
+  iterations never waits for a part that no user can reach.
+  """
   def resize(%{sessions: sessions} = cluster, target) do
-    count = length(sessions)
+    order =
+      sessions
+      |> Enum.with_index()
+      |> Enum.sort_by(fn {session, index} ->
+        {if(cluster.counting and session.done >= session.budget, do: 1, else: 0), index}
+      end)
+      |> Enum.map(&elem(&1, 1))
+
+    share = order |> Enum.zip(shares(target, length(sessions))) |> Map.new()
 
     sessions =
       sessions
       |> Enum.with_index()
       |> Enum.map(fn {session, index} ->
-        share = div(target, count) + if(index < rem(target, count), do: 1, else: 0)
-        if share != session.users, do: send(session.pid, {:users, share})
-        %{session | users: share}
+        if share[index] != session.users, do: send(session.pid, {:users, share[index]})
+        %{session | users: share[index]}
       end)
 
     %{cluster | sessions: sessions}
+  end
+
+  @doc """
+  Opens a stage with a count (C103, C175) on every worker. With iter/vu each worker's
+  users run their own count. A total is split once, when the stage opens, in
+  proportion to how `split` users divide across the workers, so a worker without users
+  gets no iterations.
+  """
+  def open(%{sessions: sessions} = cluster, users, total, per_user, split) do
+    stage = cluster.stage + 1
+    count = length(sessions)
+    user_shares = shares(users, count)
+
+    parts =
+      if per_user > 0,
+        do: Enum.map(user_shares, &(&1 * per_user)),
+        else: portions(total, shares(split, count))
+
+    sessions =
+      Enum.zip_with([sessions, user_shares, parts], fn [session, users, part] ->
+        send(session.pid, {:count, stage, users, part, per_user})
+        %{session | users: users, budget: part, done: 0, left: part}
+      end)
+
+    %{cluster | sessions: sessions, stage: stage, counting: true}
+  end
+
+  @doc "A time stage on every worker: users run iterations without claiming them."
+  def free(%{sessions: sessions} = cluster) do
+    Enum.each(sessions, &send(&1.pid, :free))
+    %{cluster | counting: false}
+  end
+
+  @doc "Takes a worker's report on the open count stage."
+  def progress(%{stage: stage} = cluster, pid, %{stage: stage} = report) do
+    sessions =
+      Enum.map(cluster.sessions, fn
+        %{pid: ^pid} = session -> %{session | done: report.done, left: report.left}
+        session -> session
+      end)
+
+    %{cluster | sessions: sessions}
+  end
+
+  def progress(cluster, _pid, _report), do: cluster
+
+  @doc "The iterations of the open count stage that have finished, on every worker."
+  def done(cluster), do: cluster.sessions |> Enum.map(& &1.done) |> Enum.sum()
+
+  @doc "The iterations of the open count stage no user has claimed yet, on every worker."
+  def left(cluster), do: cluster.sessions |> Enum.map(& &1.left) |> Enum.sum()
+
+  defp shares(total, count),
+    do: for(index <- 0..(count - 1), do: div(total, count) + if(index < rem(total, count), do: 1, else: 0))
+
+  # total split in proportion to weights; what rounding leaves goes to the first
+  # workers with a weight, so a worker without one gets nothing.
+  defp portions(total, weights) do
+    sum = Enum.sum(weights)
+    floors = Enum.map(weights, &div(total * &1, sum))
+
+    {parts, _rest} =
+      Enum.map_reduce(Enum.zip(weights, floors), total - Enum.sum(floors), fn
+        {weight, floor}, rest when weight > 0 and rest > 0 -> {floor + 1, rest - 1}
+        {_weight, floor}, rest -> {floor, rest}
+      end)
+
+    parts
   end
 
   @doc """
@@ -285,8 +344,8 @@ defmodule Aetherion.Cluster do
 
   defp await(cluster, waiting, test, deadline) do
     receive do
-      {:aetherion_counted, rows} ->
-        Recorder.merge_counted(test.recorder, rows)
+      {:aetherion_progress, _pid, report} ->
+        Recorder.merge_counted(test.recorder, report.rows)
         await(cluster, waiting, test, deadline)
 
       {:aetherion_done, pid, result} ->
@@ -307,10 +366,18 @@ defmodule Aetherion.Cluster do
     end
   end
 
+  # A worker's times are already on this node's clock.
   defp merge(test, result) do
     Recorder.merge_counted(test.recorder, result.counted)
     Recorder.merge(test.recorder, result.recorder)
-    :ets.insert(test.vars, result.vars)
+
+    # The Actions variable of the iteration that set it last, on any worker (C136).
+    for {name, _value, at} = var <- result.vars do
+      case :ets.lookup(test.vars, name) do
+        [{^name, _other, later}] when later >= at -> :ok
+        _ -> :ets.insert(test.vars, var)
+      end
+    end
 
     for {{id, _key}, value} <- result.cell_adds,
         do: :ets.insert(test.cells, {{id, :erlang.unique_integer([:monotonic])}, value})

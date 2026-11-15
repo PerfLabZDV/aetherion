@@ -16,7 +16,9 @@ defmodule Aetherion.Load do
 
   With workers (`rt.workers`), the stages run here as before, but the users run on
   the workers: each user count is split across them (`Aetherion.Cluster`), and each
-  worker runs its share with the same user code as here (`Aetherion.Worker`).
+  worker runs its share with the same user code as here (`Aetherion.Worker`). A
+  stage with a count splits its iterations too, when it opens, in proportion to the
+  users, and ends when every worker has finished its part.
   """
 
   alias PerfLang.AST
@@ -116,6 +118,16 @@ defmodule Aetherion.Load do
   @doc "Stops every user and waits for each to finish its request."
   def stop_users(state), do: stop_all(state)
 
+  @doc "Opens a stage with a count here: `users` users claim `total` iterations, `per_user` each with iter/vu."
+  def open(state, users, total, per_user), do: open_budget(state, users, total, per_user)
+
+  @doc "A time stage here: users run iterations without claiming them."
+  def free(state), do: run_freely(state)
+
+  @doc "The iterations of the open count stage here that have finished, and those not claimed yet."
+  def progress(%{budget: budget}),
+    do: %{done: :atomics.get(budget, @done), left: max(:atomics.get(budget, @budget), 0)}
+
   defp count(%{users: %AST.UsersLiteral{value: value}}), do: value
 
   # ---------- Stages ----------
@@ -123,7 +135,7 @@ defmodule Aetherion.Load do
   defp run_stage(%AST.NowStage{} = stage, _previous, state), do: {:cont, set_users(state, count(stage))}
 
   defp run_stage(%AST.HoldStage{duration: %AST.TimeLiteral{} = duration} = stage, _previous, state) do
-    run_freely(state)
+    state = run_freely(state)
     state = set_users(state, count(stage))
     wait_until(state, Recorder.now() + Values.milliseconds(duration))
   end
@@ -146,7 +158,7 @@ defmodule Aetherion.Load do
   end
 
   defp run_stage(%AST.RampStage{duration: %AST.TimeLiteral{} = duration} = stage, previous, state) do
-    run_freely(state)
+    state = run_freely(state)
     length = Values.milliseconds(duration)
     start = Recorder.now()
     ramp_time(stage, previous, state, start, length)
@@ -155,11 +167,16 @@ defmodule Aetherion.Load do
   defp run_stage(%AST.RampStage{duration: %AST.IterationsLiteral{value: total}} = stage, previous, state) do
     target = count(stage)
 
-    # A ramp by iterations needs a user to start with.
-    state = open_budget(state, max(previous, 1), total, 0)
+    # A ramp by iterations needs a user to start with. On workers its iterations
+    # are split by the largest user count of the stage, so every worker that gets
+    # users during the ramp has a part.
+    state = open_budget(state, max(previous, 1), total, 0, Enum.max([previous, target, 1]))
 
+    # Its curve may round to no user, at the start of a ramp up from 0 or the end of
+    # a ramp down to 0; one user stays while iterations are left, or the stage
+    # would never end (C103).
     wait_for_budget(state, total, fn state, progress ->
-      set_users(state, step(stage, previous, target, progress, state))
+      set_users(state, max(step(stage, previous, target, progress, state), 1))
     end)
   end
 
@@ -221,10 +238,10 @@ defmodule Aetherion.Load do
   # The stage ends when every iteration it counts has finished. The budget
   # stays closed afterwards, so users wait for the next stage (C103).
   defp wait_for_budget(state, total, on_progress) do
-    if :atomics.get(state.budget, @done) >= total do
+    if done(state) >= total do
       {:cont, state}
     else
-      remaining = max(:atomics.get(state.budget, @budget), 0)
+      remaining = left(state)
       state = on_progress.(state, (total - remaining) / total)
 
       case tick(state) do
@@ -237,8 +254,11 @@ defmodule Aetherion.Load do
   # Closes the budget before the user count changes, so a user that is told
   # to stop cannot claim from the new stage, then opens it. The stage number
   # changes before the budget opens, so a user that claims from it reads the
-  # new number.
-  defp open_budget(%{budget: budget} = state, users, total, per_user) do
+  # new number. On workers, each worker does this for its part, and split is
+  # the user count the iterations are divided by.
+  defp open_budget(state, users, total, per_user, split \\ nil)
+
+  defp open_budget(%{cluster: nil, budget: budget} = state, users, total, per_user, _split) do
     :atomics.put(budget, @budget, 0)
     :atomics.put(budget, @counting, 1)
     state = set_users(state, users)
@@ -249,8 +269,24 @@ defmodule Aetherion.Load do
     state
   end
 
+  defp open_budget(%{cluster: cluster} = state, users, total, per_user, split) do
+    Recorder.users(state.ctx.test.recorder, users)
+    %{state | cluster: Cluster.open(cluster, users, total, per_user, split || users)}
+  end
+
   # A time stage: users run iterations without claiming them.
-  defp run_freely(%{budget: budget}), do: :atomics.put(budget, @counting, 0)
+  defp run_freely(%{cluster: nil, budget: budget} = state) do
+    :atomics.put(budget, @counting, 0)
+    state
+  end
+
+  defp run_freely(%{cluster: cluster} = state), do: %{state | cluster: Cluster.free(cluster)}
+
+  defp done(%{cluster: nil, budget: budget}), do: :atomics.get(budget, @done)
+  defp done(%{cluster: cluster}), do: Cluster.done(cluster)
+
+  defp left(%{cluster: nil, budget: budget}), do: max(:atomics.get(budget, @budget), 0)
+  defp left(%{cluster: cluster}), do: Cluster.left(cluster)
 
   # ---------- The controller's clock ----------
 
@@ -262,9 +298,9 @@ defmodule Aetherion.Load do
       {:perflang_stop_if, source} ->
         {:halt, {:stopped, source}, state}
 
-      {:aetherion_counted, rows} ->
-        Recorder.merge_counted(state.ctx.test.recorder, rows)
-        {:cont, state}
+      {:aetherion_progress, pid, report} ->
+        Recorder.merge_counted(state.ctx.test.recorder, report.rows)
+        {:cont, %{state | cluster: Cluster.progress(state.cluster, pid, report)}}
 
       {:DOWN, _ref, :process, pid, reason} ->
         {:cont, down(state, pid, reason)}

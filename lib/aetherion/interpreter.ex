@@ -242,10 +242,11 @@ defmodule Aetherion.Interpreter do
     end
   end
 
-  # An Actions variable that Verify or Cleanup reads (C136).
+  # An Actions variable that Verify or Cleanup reads (C136), with when it was set,
+  # so the last one wins when workers send theirs.
   defp track(name, value, env, %{phase: :actions, test: test}) do
     if length(env) == 2 and MapSet.member?(test.tracked, name) do
-      :ets.insert(test.vars, {name, value})
+      :ets.insert(test.vars, {name, value, Recorder.now()})
     end
   end
 

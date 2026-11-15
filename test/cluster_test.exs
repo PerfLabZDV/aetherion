@@ -79,6 +79,9 @@ defmodule Aetherion.ClusterTest do
 
   defp totals(run), do: hd(hd(run.runs).tests).snapshot.totals
 
+  defp ms(time),
+    do: time |> DateTime.from_iso8601() |> elem(1) |> DateTime.to_unix(:microsecond) |> Kernel./(1000)
+
   defp temp(name),
     do:
       Path.join(System.tmp_dir!(), "aetherion-#{System.pid()}-#{System.unique_integer([:positive])}-#{name}")
@@ -219,31 +222,136 @@ defmodule Aetherion.ClusterTest do
     end
   end
 
-  describe "check/1" do
-    test "rejects stages that count iterations, and a Load without stages" do
-      server = server(fn _ -> 200 end)
+  describe "stages with a count on workers (C103, C175)" do
+    defp lines(file), do: file |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&JSON.decode!/1)
 
-      assert {:error, [error]} =
-               Cluster.check(analyze(suite(server, load: "stages [ 2vu for 10iter ]", actions: "")))
+    test "a total is split across the workers and runs exactly" do
+      server = server(fn _ -> {:sleep, 2, 200} end)
+      file = temp("total.jsonl")
+      {_peers, nodes} = workers(2)
 
-      assert error.message =~ "count iterations"
-      assert error.line > 0
+      source =
+        suite(server,
+          output: ~s|output { requests { file = "#{file}"; fields = [virtualUser]; } }|,
+          load: "stages [ 5vu for 41iter ]",
+          actions: ~S|sut.api.http.get("/");|
+        )
 
-      assert {:error, [error]} =
-               Cluster.check(analyze(suite(server, load: "requestTimeout 5s;", actions: "")))
+      result = run(source, workers: nodes)
 
-      assert error.message =~ "no stages"
-
-      assert :ok =
-               Cluster.check(analyze(suite(server, load: "stages [ 2vu in 1s, 2vu for 1m ]", actions: "")))
+      assert result.exit_code == 0
+      assert settled?(server)
+      assert length(TestServer.requests(server)) == 41
+      assert totals(result).requests == 41
+      assert file |> lines() |> Enum.map(& &1["virtualUser"]) |> Enum.uniq() |> Enum.sort() == [1, 2, 3, 4, 5]
     end
 
-    test "Aetherion.run refuses them too" do
+    test "iter/vu gives every user its own count, on its worker" do
       server = server(fn _ -> 200 end)
+      file = temp("per-user.jsonl")
+      {_peers, nodes} = workers(2)
 
-      assert_raise ArgumentError, ~r/count iterations/, fn ->
-        run(suite(server, load: "stages [ 2vu for 1iter/vu ]", actions: ""), workers: [node()])
-      end
+      source =
+        suite(server,
+          output: ~s|output { requests { file = "#{file}"; fields = [virtualUser, iteration]; } }|,
+          load: "stages [ 5vu for 3iter/vu ]",
+          actions: ~S|sut.api.http.get("/");|
+        )
+
+      assert run(source, workers: nodes).exit_code == 0
+      assert file |> lines() |> Enum.frequencies_by(& &1["virtualUser"]) == Map.new(1..5, &{&1, 3})
+    end
+
+    test "a ramp by iterations finishes when its users reach some workers late" do
+      # From 0 to 3 users on 3 workers: each worker has a part, but the ramp has one
+      # user while the first part is used up, so the users must move to the others.
+      server = server(fn _ -> {:sleep, 2, 200} end)
+      {_peers, nodes} = workers(3)
+
+      source = suite(server, load: "stages [ 3vu in 30iter ]", actions: ~S|sut.api.http.get("/");|)
+      result = run(source, workers: nodes)
+
+      assert result.exit_code == 0
+      assert length(TestServer.requests(server)) == 30
+    end
+
+    test "a Load without stages runs one iteration, and a time stage can follow a count" do
+      server = server(fn _ -> 200 end)
+      {_peers, nodes} = workers(2)
+
+      result =
+        run(suite(server, load: "requestTimeout 5s;", actions: ~S|sut.api.http.get("/");|), workers: nodes)
+
+      assert result.exit_code == 0
+      assert length(TestServer.requests(server)) == 1
+
+      source =
+        suite(server,
+          load: "stages [ 2vu for 10iter, 2vu for 300ms ]",
+          actions: ~S|sut.api.http.get("/next");|
+        )
+
+      assert run(source, workers: nodes).exit_code == 0
+      assert Enum.count(TestServer.requests(server), &(&1.path == "/next")) > 10
+    end
+  end
+
+  describe "one clock across workers" do
+    test "the requests file is in time order across workers, and warmup ends at once on all of them" do
+      server = server(fn _ -> {:sleep, 2, 200} end)
+      file = temp("clock.jsonl")
+      {_peers, nodes} = workers(2)
+
+      source =
+        suite(server,
+          output:
+            ~s|output { requests { file = "#{file}"; fields = [time, virtualUser]; includeWarmup = true; } }|,
+          load: "warmup 300ms; stages [ 4vu for 700ms ]",
+          actions: ~S|sut.api.http.get("/");|
+        )
+
+      assert run(source, workers: nodes).exit_code == 0
+      records = Enum.map(lines(file), &Map.put(&1, "ms", ms(&1["time"])))
+
+      # Each worker's VM has a monotonic clock of its own; the file is sorted on the main server's.
+      for [earlier, later] <- Enum.chunk_every(records, 2, 1, :discard),
+          do: assert(later["ms"] >= earlier["ms"] - 5)
+
+      {warm, measured} = Enum.split_with(records, & &1["warmup"])
+      users = fn list -> list |> Enum.map(& &1["virtualUser"]) |> Enum.uniq() |> Enum.sort() end
+      assert users.(warm) == [1, 2, 3, 4]
+      assert users.(measured) == [1, 2, 3, 4]
+      assert Enum.max_by(warm, & &1["ms"])["ms"] <= Enum.min_by(measured, & &1["ms"])["ms"] + 5
+    end
+
+    test "Verify reads the Actions variable of the last iteration, whichever worker ran it (C136)" do
+      counter = :counters.new(1, [])
+
+      server =
+        server(fn
+          %{path: "/next"} ->
+            :counters.add(counter, 1, 1)
+            {200, %{"n" => :counters.get(counter, 1)}}
+
+          _other ->
+            200
+        end)
+
+      {_peers, nodes} = workers(2)
+
+      # The last 400ms only the first worker has a user, so its last value is the latest.
+      source =
+        suite(server,
+          load: "stages [ 2vu now, 2vu for 400ms, 1vu for 400ms ]",
+          actions: ~S"""
+          let response = sut.api.http.get("/next");
+          let n = response.body["n"];
+          """,
+          cleanup: ~S|sut.api.http.get("/last?n=" + n.toString());|
+        )
+
+      assert run(source, workers: nodes).exit_code == 0
+      assert Enum.any?(TestServer.requests(server), &(&1.target == "/last?n=#{:counters.get(counter, 1)}"))
     end
   end
 

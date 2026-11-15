@@ -65,7 +65,7 @@ defmodule Aetherion.CLI do
          {:ok, config} <- config(options[:config]),
          {:ok, ast} <- PerfLang.analyze(ast, config: config),
          {:ok, _plan} <- plan(ast, options[:runs]),
-         {:ok, workers} <- workers(ast, file, options) do
+         {:ok, workers} <- workers(options) do
       {:ok, _started} = Application.ensure_all_started(:ssl)
       Aetherion.run(ast, seed: options[:seed], runs: options[:runs], workers: workers).exit_code
     else
@@ -94,26 +94,16 @@ defmodule Aetherion.CLI do
     end
   end
 
-  # The suite must suit workers before any is reached.
-  defp workers(ast, file, options) do
+  defp workers(options) do
     case options[:workers] do
       nil ->
         {:ok, []}
 
       list ->
-        with :ok <- check(ast, file) do
-          case Cluster.connect(String.split(list, ","), name: options[:name], cookie: options[:cookie]) do
-            {:ok, nodes} -> {:ok, nodes}
-            {:error, message} -> {:error, :workers, message}
-          end
+        case Cluster.connect(String.split(list, ","), name: options[:name], cookie: options[:cookie]) do
+          {:ok, nodes} -> {:ok, nodes}
+          {:error, message} -> {:error, :workers, message}
         end
-    end
-  end
-
-  defp check(ast, file) do
-    case Cluster.check(ast) do
-      :ok -> :ok
-      {:error, errors} -> {:error, Enum.map(errors, &%{&1 | file: file})}
     end
   end
 
