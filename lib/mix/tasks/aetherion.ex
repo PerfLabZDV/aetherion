@@ -1,9 +1,10 @@
 defmodule Mix.Tasks.Aetherion do
   @shortdoc "Runs a PerfLang test suite"
   @moduledoc """
-  Runs a PerfLang test suite (C165):
+  Runs a PerfLang test suite (C165), or a worker for one:
 
       mix aetherion run t6.perf --config staging.perfcfg --seed 42
+      mix aetherion worker --name worker1@10.0.0.11
 
   The process exits with 0 when every Test passed, 1 when a Test failed and 2
   when the run could not start or finish (C132). `bin/aetherion` runs the same

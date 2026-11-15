@@ -28,11 +28,14 @@ lib/aetherion/signals.ex       a clean stop on SIGTERM
 lib/aetherion/cells.ex         `let mut` lists, the only values `add` changes
 lib/aetherion/values.ex        run-time values and their operators
 lib/aetherion/source.ex        source text of an AST node, for messages
+lib/aetherion/cluster.ex       the main server's side of a run on workers
+lib/aetherion/worker.ex        a worker, and its sessions of virtual users
 lib/aetherion/cli.ex           the command line, and its exit codes
 lib/mix/tasks/aetherion.ex     mix aetherion run
 bin/aetherion                  the same command, and a clean stop on Ctrl+C
-test/                          483 tests; fixtures/full_suite.perf holds every example from the EBNF, and
-                               server_helper.exs a local HTTP server and MQTT broker for the engine tests
+test/                          492 tests; fixtures/full_suite.perf holds every example from the EBNF,
+                               server_helper.exs a local HTTP server and MQTT broker for the engine tests, and
+                               cluster_test.exs runs suites on worker nodes on this machine
 examples/                      example suites, e.g. t1-basic-http-get-req.perf, and staging.perfcfg, an external
                                configuration file
 ```
@@ -71,6 +74,46 @@ Cleanup; SIGTERM works under both.
 
 A virtual user is one process with its own connection. On one machine, against a local Elixir server, the engine
 reached about 20,000 requests a second with 2000 users. Watch `loadGenerator.cpu`: a busy generator measures itself.
+
+## Workers
+
+One machine can be the limit: its CPU, its connections, or where the load comes from. With workers, a main server
+runs the suite and other servers run the virtual users. The main server runs the stages, Setup, Verify, Cleanup,
+stopIf, the monitoring of the system under test and the report, and splits each user count across the workers.
+The workers only run Actions.
+
+```sh
+# on every worker, left running; the same version of Aetherion on every server
+export AETHERION_COOKIE=...   # a long random secret, the same on every server
+bin/aetherion worker --name worker1@10.0.0.11
+
+# on the main server
+export AETHERION_COOKIE=...
+bin/aetherion run shop.perf --config staging.perfcfg --workers worker1@10.0.0.11,worker2@10.0.0.12,worker3@10.0.0.13
+```
+
+With `stages [ 2000vu for 5m ]` and three workers, each runs 667 users, the first one more. Users are numbered
+across the workers, so `virtualUser` in the requests file stays unique. The workers send the requests that count every
+200ms, so stopIf and the console report see all of them, and percentiles stay exact (C172). When the stages end,
+each worker stops its users, waits for their last requests and sends what it recorded; Verify starts after that.
+
+The nodes talk over Erlang distribution: port 4369 (epmd) and one port per node, which can be fixed for a firewall
+with `ELIXIR_ERL_OPTIONS="-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100"`. The cookie is the only check
+and nothing is encrypted, so keep the nodes on a private network or a VPN such as WireGuard. `--name main@10.0.0.10` names the main server's node; by default
+it is named after the address that reaches the first worker. `--cookie` works too, but shows in the process list.
+
+A worker that goes away ends the run with exit code 2, as a run that cannot finish (C132), and the other workers stop
+their users. Ctrl+C on the main server stops the users on every worker, and Cleanup runs (C155). Workers stay up for
+the next run.
+
+Not on workers yet:
+
+* Stages that count iterations (`iter`, `iter/vu`) and a Load without stages: the run refuses to start.
+* An `add` from Actions to a list of Setup (C137) reaches Verify and Cleanup, but not the users of other workers during
+  the run.
+* An Actions variable that Verify reads (C136) comes from the worker that reported last.
+* Each worker starts its warmup when the main server starts it, so warmup ends a network delay later there.
+* `loadGenerator.cpu` and `loadGenerator.mem` read the main server, which sends no load.
 
 ## Usage
 

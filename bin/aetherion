@@ -5,7 +5,7 @@
 # and skip Cleanup (C155). This keeps the VM from seeing it and sends SIGTERM,
 # which the engine handles. Paths stay relative to the working directory (C119).
 export AETHERION_CWD="$PWD"
-export ELIXIR_ERL_OPTIONS="+Bi"
+export ELIXIR_ERL_OPTIONS="+Bi ${ELIXIR_ERL_OPTIONS:-}"
 cd "$(dirname "$0")/.." || exit 2
 
 mix aetherion "$@" &

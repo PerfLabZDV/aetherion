@@ -13,10 +13,14 @@ defmodule Aetherion.Load do
 
   stopIf is checked once a second (C58). Returns `:finished`, `{:stopped, source}`
   or `:interrupted`.
+
+  With workers (`rt.workers`), the stages run here as before, but the users run on
+  the workers: each user count is split across them (`Aetherion.Cluster`), and each
+  worker runs its share with the same user code as here (`Aetherion.Worker`).
   """
 
   alias PerfLang.AST
-  alias Aetherion.{Http, Interpreter, Recorder, Source, Values}
+  alias Aetherion.{Cluster, Http, Interpreter, Recorder, Source, Values}
 
   @tick 10
 
@@ -35,14 +39,32 @@ defmodule Aetherion.Load do
   @claimed :perflang_claimed
 
   def run(ctx) do
-    budget = :atomics.new(5, signed: true)
-    # users are the users of the current stage, stopping the users a stage
-    # took away that are still finishing their request.
-    state = %{ctx: ctx, users: [], stopping: [], next: 1, budget: budget}
-    watcher = start_watcher(ctx)
+    state = users(ctx, 1, 1)
+
+    case Map.get(ctx.rt, :workers, []) do
+      [] -> run_stages(state)
+      workers -> run_on(workers, state)
+    end
+  end
+
+  # The cluster goes down with the run: a worker must not keep sending load.
+  defp run_on(workers, state) do
+    cluster = Cluster.start(workers, state.ctx)
+
+    try do
+      run_stages(%{state | cluster: cluster})
+    rescue
+      error ->
+        Cluster.abort(cluster)
+        reraise error, __STACKTRACE__
+    end
+  end
+
+  defp run_stages(state) do
+    watcher = start_watcher(state.ctx)
 
     result =
-      ctx.test.load.stages
+      state.ctx.test.load.stages
       |> Enum.reduce_while({0, state}, fn stage, {previous, state} ->
         case run_stage(stage, previous, state) do
           {:cont, state} -> {:cont, {count(stage), state}}
@@ -62,6 +84,37 @@ defmodule Aetherion.Load do
         :finished
     end
   end
+
+  # ---------- Users, for a worker's share (Aetherion.Worker) ----------
+
+  @doc """
+  The users of one process: none yet, numbered from `first` in steps of `step`, so the
+  users of several workers never share a number. Every iteration is free, as in a time
+  stage.
+  """
+  def users(ctx, first, step) do
+    # users are the users of the current stage, stopping the users a stage
+    # took away that are still finishing their request. cluster is set on the
+    # main server when the users run on workers.
+    %{
+      ctx: ctx,
+      users: [],
+      stopping: [],
+      next: first,
+      step: step,
+      budget: :atomics.new(5, signed: true),
+      cluster: nil
+    }
+  end
+
+  @doc "Starts or stops users here until there are `target`."
+  def resize(state, target), do: set_users(state, target)
+
+  @doc "Handles the `:DOWN` of a user; a crashed user stops the others and raises."
+  def user_down(state, pid, reason), do: down(state, pid, reason)
+
+  @doc "Stops every user and waits for each to finish its request."
+  def stop_users(state), do: stop_all(state)
 
   defp count(%{users: %AST.UsersLiteral{value: value}}), do: value
 
@@ -209,17 +262,28 @@ defmodule Aetherion.Load do
       {:perflang_stop_if, source} ->
         {:halt, {:stopped, source}, state}
 
-      {:DOWN, _ref, :process, pid, reason} when reason in [:normal, :killed] ->
-        {:cont, %{state | users: List.delete(state.users, pid), stopping: List.delete(state.stopping, pid)}}
+      {:aetherion_counted, rows} ->
+        Recorder.merge_counted(state.ctx.test.recorder, rows)
+        {:cont, state}
 
       {:DOWN, _ref, :process, pid, reason} ->
-        # The other users must not outlive the run.
-        stop_all(%{state | users: List.delete(state.users, pid), stopping: List.delete(state.stopping, pid)})
-        raise "a virtual user crashed: #{inspect(reason)}"
+        {:cont, down(state, pid, reason)}
     after
       @tick -> {:cont, state}
     end
   end
+
+  defp down(%{cluster: nil} = state, pid, reason) when reason in [:normal, :killed],
+    do: %{state | users: List.delete(state.users, pid), stopping: List.delete(state.stopping, pid)}
+
+  defp down(%{cluster: nil} = state, pid, reason) do
+    # The other users must not outlive the run.
+    stop_all(%{state | users: List.delete(state.users, pid), stopping: List.delete(state.stopping, pid)})
+    raise "a virtual user crashed: #{inspect(reason)}"
+  end
+
+  # The run cannot finish without the users of a worker (C132).
+  defp down(%{cluster: cluster}, pid, reason), do: Cluster.lost!(cluster, pid, reason)
 
   # stopIf has its own process: reading metrics must not delay the stages.
   defp start_watcher(%{test: %{load: %{stop_ifs: []}}}), do: nil
@@ -244,7 +308,14 @@ defmodule Aetherion.Load do
 
   # ---------- Virtual users ----------
 
-  defp set_users(state, target) do
+  defp set_users(%{cluster: nil} = state, target), do: set_local_users(state, target)
+
+  defp set_users(%{cluster: cluster} = state, target) do
+    Recorder.users(state.ctx.test.recorder, target)
+    %{state | cluster: Cluster.resize(cluster, target)}
+  end
+
+  defp set_local_users(state, target) do
     current = length(state.users)
 
     state =
@@ -269,7 +340,7 @@ defmodule Aetherion.Load do
     budget = state.budget
     ctx = %{state.ctx | vu: state.next}
     {pid, _ref} = spawn_monitor(fn -> user(ctx, budget) end)
-    %{state | users: [pid | state.users], next: state.next + 1}
+    %{state | users: [pid | state.users], next: state.next + state.step}
   end
 
   defp user(ctx, budget) do
@@ -383,13 +454,17 @@ defmodule Aetherion.Load do
   end
 
   # Waits for the users of the last stage and for those a stage took away:
-  # a user still in a request would record it after the run has ended.
-  defp stop_all(state) do
+  # a user still in a request would record it after the run has ended. On
+  # workers, each worker does this for its users and then sends what it recorded.
+  defp stop_all(%{cluster: nil} = state) do
     Enum.each(state.users, &send(&1, Http.stop_message()))
-    load = state.ctx.test.load
-    grace = (load.timeout_ms + load.retry.delay_ms) * load.retry.attempts + 2000
-    await(state.users ++ state.stopping, Recorder.now() + grace)
+    await(state.users ++ state.stopping, Recorder.now() + grace(state.ctx.test.load))
   end
+
+  defp stop_all(%{cluster: cluster, ctx: ctx}), do: Cluster.stop(cluster, ctx.test, grace(ctx.test.load))
+
+  @doc "How long a user may take to finish its request once it is told to stop."
+  def grace(load), do: (load.timeout_ms + load.retry.delay_ms) * load.retry.attempts + 2000
 
   defp await([], _deadline), do: :ok
 

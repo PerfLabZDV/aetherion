@@ -20,13 +20,14 @@ defmodule Aetherion do
   """
 
   alias PerfLang.AST
-  alias Aetherion.{Http, Interpreter, Load, Monitor, Recorder, Report, Signals, Stats, Values}
+  alias Aetherion.{Cluster, Http, Interpreter, Load, Monitor, Recorder, Report, Signals, Stats, Values}
 
   @phase_limit :timer.minutes(5)
 
   @doc """
   Options: `:seed`, `:runs` (replaces the count of the runs section), `:report` (false for no
-  console report), `:phase_limit_ms`, `:signals` (false to leave them alone).
+  console report), `:phase_limit_ms`, `:signals` (false to leave them alone), `:workers` (nodes
+  that `Aetherion.Cluster.connect/2` connected, to run the virtual users on).
   """
   def run(%AST.TestSuite{} = ast, opts \\ []) do
     plan =
@@ -34,6 +35,11 @@ defmodule Aetherion do
         {:ok, plan} -> plan
         {:error, message} -> raise ArgumentError, message
       end
+
+    with [_ | _] <- opts[:workers] || [],
+         {:error, errors} <- Cluster.check(ast) do
+      raise ArgumentError, Enum.map_join(errors, "\n", &PerfLang.Error.format/1)
+    end
 
     seed = opts[:seed] || :rand.uniform(2_147_483_647)
     started_at = DateTime.utc_now()
@@ -438,6 +444,7 @@ defmodule Aetherion do
     %{
       seed: seed,
       run: 1,
+      workers: opts[:workers] || [],
       phase_limit: opts[:phase_limit_ms] || @phase_limit,
       fns: Map.new(ast.functions || [], &{&1.name, &1}),
       targets: for(%AST.Sut{targets: targets} <- sections, target <- targets, into: %{}, do: target(target)),

@@ -37,20 +37,31 @@ defmodule Aetherion.Recorder do
 
   @pending {__MODULE__, :pending}
 
-  def new do
+  @counter_count 7
+
+  @doc """
+  A new recorder. With `outbox: true`, as on a worker, a request that counts goes into an
+  outbox instead, which `take_counted/1` empties for the main server.
+  """
+  def new(opts \\ []) do
     %{
       requests: :ets.new(:requests, [:ordered_set, :public, write_concurrency: true]),
       counted: :ets.new(:counted, [:duplicate_bag, :public, write_concurrency: true]),
       live: :counters.new(6, [:write_concurrency]),
       failures: :ets.new(:failures, [:set, :public, write_concurrency: true]),
       verify: :ets.new(:verify, [:ordered_set, :public]),
-      counters: :counters.new(7, [:write_concurrency]),
-      clock: :atomics.new(5, signed: true)
+      counters: :counters.new(@counter_count, [:write_concurrency]),
+      clock: :atomics.new(5, signed: true),
+      outbox:
+        if(Keyword.get(opts, :outbox, false),
+          do: :ets.new(:outbox, [:ordered_set, :public, write_concurrency: true])
+        )
     }
   end
 
   def delete(recorder) do
-    for table <- [recorder.requests, recorder.counted, recorder.failures, recorder.verify],
+    for table <- [recorder.requests, recorder.counted, recorder.failures, recorder.verify, recorder.outbox],
+        table != nil,
         do: :ets.delete(table)
 
     :ok
@@ -68,6 +79,10 @@ defmodule Aetherion.Recorder do
   def end_window(recorder), do: :atomics.put(recorder.clock, @window_end, System.monotonic_time(:microsecond))
 
   def warmup?(recorder), do: System.monotonic_time(:microsecond) < :atomics.get(recorder.clock, @warmup_end)
+
+  @doc "Milliseconds of warmup still to come, for a worker that joins the window now."
+  def warmup_left(recorder),
+    do: max(:atomics.get(recorder.clock, @warmup_end) - System.monotonic_time(:microsecond), 0) / 1000
 
   @doc "The measured window on the monotonic clock, in milliseconds: Actions outside warmup (C162)."
   def window(recorder) do
@@ -118,17 +133,79 @@ defmodule Aetherion.Recorder do
   defp counted?(_record), do: false
 
   defp count(recorder, record) do
-    :ets.insert(recorder.counted, {record.outcome, record.latency, record.target, record.method, record.path})
+    row = {record.outcome, record.latency, record.target, record.method, record.path}
+
+    case recorder.outbox do
+      nil -> count_row(recorder, row)
+      outbox -> :ets.insert(outbox, {:erlang.unique_integer([:monotonic]), row})
+    end
+  end
+
+  defp count_row(recorder, {outcome, _latency, _target, _method, _path} = row) do
+    :ets.insert(recorder.counted, row)
     :counters.add(recorder.live, @live_requests, 1)
 
-    if record.outcome != "ok" do
+    if outcome != "ok" do
       :counters.add(recorder.live, @live_failed, 1)
 
-      case Map.fetch(@live_outcomes, record.outcome) do
+      case Map.fetch(@live_outcomes, outcome) do
         {:ok, index} -> :counters.add(recorder.live, index, 1)
         :error -> :ok
       end
     end
+  end
+
+  # ---------- Workers ----------
+
+  @doc """
+  Empties the outbox of a worker's recorder. Each row is taken on its own, so a row a user
+  inserts meanwhile stays for the next call.
+  """
+  def take_counted(%{outbox: outbox}) do
+    outbox
+    |> :ets.select([{{:"$1", :_}, [], [:"$1"]}])
+    |> Enum.flat_map(fn key ->
+      case :ets.take(outbox, key) do
+        [{_key, row}] -> [row]
+        [] -> []
+      end
+    end)
+  end
+
+  @doc "Counts the rows a worker sent, as if its users had made the requests here."
+  def merge_counted(recorder, rows), do: Enum.each(rows, &count_row(recorder, &1))
+
+  @doc """
+  What a worker's recorder holds besides the outbox, for the main server: the counters, the
+  failures, and with `requests?` every request attempt, its `at` moved onto the main
+  server's clock by `offset_ms`.
+  """
+  def export(recorder, offset_ms, requests?) do
+    %{
+      requests:
+        if(requests?,
+          do:
+            for({_key, record} <- :ets.tab2list(recorder.requests), do: %{record | at: record.at + offset_ms}),
+          else: []
+        ),
+      counters: for(index <- 1..@counter_count, do: :counters.get(recorder.counters, index)),
+      failures: :ets.tab2list(recorder.failures)
+    }
+  end
+
+  @doc "Adds what `export/3` gave on a worker."
+  def merge(recorder, %{requests: requests, counters: counters, failures: failures}) do
+    for record <- requests,
+        do: :ets.insert(recorder.requests, {{record.at, :erlang.unique_integer([:monotonic])}, record})
+
+    for {value, index} <- Enum.with_index(counters, 1),
+        value != 0,
+        do: :counters.add(recorder.counters, index, value)
+
+    for {key, count} <- failures,
+        do: :ets.update_counter(recorder.failures, key, count, {key, 0})
+
+    :ok
   end
 
   # A request that is not ok keeps its outcome and counts once (C125, C130).
