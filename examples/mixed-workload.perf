@@ -23,9 +23,40 @@
 
 TestSuite MixedWorkload {
   Config {
+    workers {
+      worker1 { host = "192.168.178.161"; }
+      worker2 { host = "192.168.178.162"; }
+      worker3 { host = "192.168.178.163"; }
+    }
+
     sut {
       // The nginx front end of socialNetwork.
-      socialNetwork { baseUrl = "http://localhost:8080"; }
+      socialNetwork { baseUrl = "http://192.168.178.91:8080"; }
+
+      // The machines measured by Tasmota smart plugs. Each is a target of
+      // its own whose only metric comes over MQTT, so it needs no baseUrl or
+      // host (C156, C163).
+      sutServer1 { metrics = [power]; topics { power = "tele/tasmota_64E19E/SENSOR"; } }
+      sutServer2 { metrics = [power]; topics { power = "tele/tasmota_64FA5B/SENSOR"; } }
+      sutServer3 { metrics = [power]; topics { power = "tele/tasmota_658675/SENSOR"; } }
+
+      // The machine that runs aetherion. Listing power here adds it to
+      // energy.total() and power.mean(), which sum every target with power;
+      // the report and the summary still give the energy of each target
+      // (C161).
+      aetherionServer { metrics = [power]; topics { power = "tele/tasmota_178FF1/SENSOR"; } }
+    }
+
+    monitoring {
+      // Tasmota publishes {"Time": ..., "ENERGY": {"Power": <watts>, ...}}
+      // on tele/<device>/SENSOR, once per TelePeriod (300s by default; set
+      // it lower on the plugs, e.g. TelePeriod 10). Every message is a
+      // sample, timed by its arrival (C162, C163).
+      mqtt {
+        broker = "mqtt://localhost:1883";
+        qos    = 1;
+        fields { power = "ENERGY.Power"; }
+      }
     }
 
     output {
@@ -35,6 +66,8 @@ TestSuite MixedWorkload {
         file   = "results/mixed_workload_requests.jsonl";
         fields = [time, method, url, status, latency, outcome];
       }
+      // Every power sample with its time and target (C173).
+      samples { file = "results/mixed_workload_samples.jsonl"; }
       summary = "results/mixed_workload_summary.json";
     }
   }
@@ -137,7 +170,7 @@ TestSuite MixedWorkload {
 
   Test MixedWorkload {
     Load {
-      // wrk2 sends as fast as its rate allows, so no thinkTime (C16).
+      thinkTime 1s;
       requestTimeout 5s;            // a timeout counts as a failure (C96, C105)
       warmup 30s;                   // the ramp is not measured (C167)
 
