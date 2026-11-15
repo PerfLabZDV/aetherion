@@ -187,6 +187,15 @@ cd packaging/ansible
 ansible-playbook deploy.yml --ask-vault-pass
 ```
 
+`packaging/build-and-deploy.sh` builds the package and runs the playbook in one step, and passes its arguments on to
+`ansible-playbook`. It asks for the vault password itself when the cookie is in a vault. When sudo on the servers asks
+for a password, add `--ask-become-pass`:
+
+```sh
+packaging/build-and-deploy.sh --ask-become-pass
+SKIP_BUILD=1 packaging/build-and-deploy.sh --ask-become-pass   # deploy the package that is built already
+```
+
 ## Usage
 
 ```sh
