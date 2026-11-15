@@ -198,6 +198,7 @@ contextual("file")          -> true;
 contextual("fields")        -> true;
 contextual("includeWarmup") -> true;
 contextual("runs")          -> true;
+contextual("workers")       -> true;
 contextual("cooldown")      -> true;
 contextual("discard")       -> true;
 contextual("fixed")         -> true;

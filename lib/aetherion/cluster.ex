@@ -24,7 +24,7 @@ defmodule Aetherion.Cluster do
   server, which sends no load.
   """
 
-  alias Aetherion.Recorder
+  alias Aetherion.{Monitor, Recorder}
 
   # ---------- Connecting ----------
 
@@ -346,6 +346,7 @@ defmodule Aetherion.Cluster do
     receive do
       {:aetherion_progress, _pid, report} ->
         Recorder.merge_counted(test.recorder, report.rows)
+        Monitor.store_samples(test.monitor, report.samples)
         await(cluster, waiting, test, deadline)
 
       {:aetherion_done, pid, result} ->
@@ -369,6 +370,7 @@ defmodule Aetherion.Cluster do
   # A worker's times are already on this node's clock.
   defp merge(test, result) do
     Recorder.merge_counted(test.recorder, result.counted)
+    Monitor.store_samples(test.monitor, result.samples)
     Recorder.merge(test.recorder, result.recorder)
 
     # The Actions variable of the iteration that set it last, on any worker (C136).

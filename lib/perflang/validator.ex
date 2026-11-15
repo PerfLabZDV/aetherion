@@ -9,8 +9,8 @@ defmodule PerfLang.Validator do
   Runs after the parser and before the Semantic Analyzer. It collects every
   error instead of stopping at the first, and returns them sorted by position.
   There are no warnings. An external configuration file (C157) gets the
-  Config checks, and holds only the sut and monitoring sections, so neither
-  output nor runs (C157, C178). The checks:
+  Config checks, and holds only the sut, monitoring and workers sections, so
+  neither output nor runs (C157, C178, C181). The checks:
 
     * Config: each section at most once (C98), each sut target once and
       none named cpu (C100, C109), each target setting at most once, and
@@ -20,7 +20,9 @@ defmodule PerfLang.Validator do
       most once, each in range (C158, C161). output: each setting at most once and summary a .json file;
       requests needs a .jsonl file, and fields lists known fields, at
       least one, each once (C119-C122). runs: each setting at most once,
-      count at least 1 and discard below count (C178).
+      count at least 1 and discard below count (C178). workers: each name
+      once and none named cpu, mem, disk, gpu or power, and each worker with
+      exactly one host, without @ (C181, C183).
     * Load placement: in the suite or in every Test, not both (C10, C11).
       The grammar already enforces this; the check covers hand-built trees.
     * Load settings at most once each, except stopIf (C61, C78).
@@ -69,7 +71,7 @@ defmodule PerfLang.Validator do
       for %{__struct__: module} = section <- sections, module in [AST.Output, AST.Runs] do
         error(
           section,
-          "an external configuration file holds only the sut and monitoring sections (C157, C178)"
+          "an external configuration file holds only the sut, monitoring and workers sections (C157, C178, C181)"
         )
       end
 
@@ -145,7 +147,8 @@ defmodule PerfLang.Validator do
     AST.Sut => "sut",
     AST.Output => "output",
     AST.Monitoring => "monitoring",
-    AST.Runs => "runs"
+    AST.Runs => "runs",
+    AST.Workers => "workers"
   }
 
   @target_settings %{
@@ -183,6 +186,37 @@ defmodule PerfLang.Validator do
       end
 
     dups ++ reserved ++ any
+  end
+
+  # The name of a worker is the name of its node, name@host (C181), and
+  # loadGenerator.cpu reads all workers (C183), so these are not worker names.
+  defp check(%AST.Workers{workers: workers}, _ctx) do
+    dups =
+      duplicates(workers, & &1.name, fn name, first ->
+        "duplicate worker #{name} (first at #{position(first)}) (C181)"
+      end)
+
+    reserved =
+      for %AST.Worker{name: name} = worker <- workers, name in @machine_metrics do
+        error(worker, "a worker cannot be named #{name}; loadGenerator.#{name} reads all workers (C183)")
+      end
+
+    dups ++ reserved
+  end
+
+  defp check(%AST.Worker{name: name, settings: settings} = worker, _ctx) do
+    case settings do
+      [] ->
+        [error(worker, "worker #{name} needs a host, such as host = \"10.0.0.11\"; (C181)")]
+
+      [%AST.Host{value: %AST.StringLiteral{value: host} = value}] ->
+        if String.contains?(host, "@"),
+          do: [error(value, "the host of worker #{name} cannot hold @; its node is #{name}@<host> (C181)")],
+          else: []
+
+      [_first, second | _rest] ->
+        [error(second, "duplicate host in worker #{name} (C181)")]
+    end
   end
 
   defp check(%AST.SutTarget{name: target, settings: settings} = node, _ctx) do

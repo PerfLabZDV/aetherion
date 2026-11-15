@@ -81,7 +81,9 @@ defmodule Aetherion.Stats do
         end),
       targets:
         keyed(summaries, :targets, & &1.name, fn name, merged -> Map.put(merged || %{}, :name, name) end),
-      loadGenerator: merge(Enum.map(summaries, & &1.loadGenerator))
+      loadGenerator: merge(Enum.map(summaries, & &1.loadGenerator)),
+      workers:
+        keyed(summaries, :workers, & &1.name, fn name, merged -> Map.put(merged || %{}, :name, name) end)
     }
   end
 

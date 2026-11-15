@@ -7,8 +7,8 @@ defmodule PerfLang.Analyzer do
 
   Runs after the Validator. `config` is the validated external configuration
   file (C157); its targets replace the ones of the same name in the suite's
-  Config, its monitoring replaces the suite's, and the returned AST holds the
-  merged Config. It collects every
+  Config, its monitoring and workers replace the suite's (C181), and the
+  returned AST holds the merged Config. It collects every
   error instead of stopping at the first, and returns them sorted by
   position. There are no warnings. The checks:
 
@@ -21,8 +21,10 @@ defmodule PerfLang.Analyzer do
       return values, conditions, operators and JSON values.
     * Members (C68, C109, C110, C112, C143, C145): Response members, targets,
       list methods and indexing.
-    * Target settings (C156, C158-C161): http calls and distribution need a
-      baseUrl, machine readings a target that lists the metric, metrics from
+    * Target settings (C156, C158-C161, C183): http calls and distribution need a
+      baseUrl, machine readings a target that lists the metric, a reading
+      of one load generator, loadGenerator.euWorker1.cpu.max(), a worker of
+      that name, metrics from
       an agent a format, a port and any field they need, topics need mqtt,
       energy, power and carbon metrics a target that lists power, and sut.any
       Actions and a distribution.
@@ -110,6 +112,7 @@ defmodule PerfLang.Analyzer do
       next: 0,
       scopes: [],
       targets: targets(ast.config),
+      workers: workers(ast.config),
       monitoring: monitoring(ast.config),
       agent_format: agent_format(ast.config),
       agent_fields: agent_fields(ast.config),
@@ -166,6 +169,12 @@ defmodule PerfLang.Analyzer do
        }}
     end)
   end
+
+  defp workers(nil), do: MapSet.new()
+
+  defp workers(%AST.Config{sections: sections}),
+    do:
+      for(%AST.Workers{workers: workers} <- sections, worker <- workers, into: MapSet.new(), do: worker.name)
 
   defp monitoring(nil), do: []
 
@@ -1164,6 +1173,23 @@ defmodule PerfLang.Analyzer do
     if lookup(name, st) || ctx.phase == :curve, do: target_value(node, ctx, st), else: {node, st}
   end
 
+  # One load generator: a worker of the workers section (C181, C183).
+  defp reading_source(%AST.Member{object: %AST.Var{name: "loadGenerator"}, name: name} = node, ctx, st) do
+    cond do
+      lookup("loadGenerator", st) || ctx.phase == :curve ->
+        target_value(node, ctx, st)
+
+      MapSet.member?(st.workers, name) ->
+        {node, st}
+
+      true ->
+        message =
+          "unknown worker #{name}; define it in Config { workers { ... } } or pass it with --workers (C183)"
+
+        {node, error(st, node, message)}
+    end
+  end
+
   defp reading_source(node, ctx, st), do: target_value(node, ctx, st)
 
   defp target_value(node, ctx, st), do: checked(node, :target, ctx, st)
@@ -1179,6 +1205,10 @@ defmodule PerfLang.Analyzer do
       do: st,
       else: error(st, node, "loadGenerator reads only cpu and mem (C160)")
   end
+
+  defp lists_metric(st, node, %AST.Member{object: %AST.Var{name: "loadGenerator"}, name: name}, metric)
+       when metric not in @load_generator_metrics,
+       do: error(st, node, "loadGenerator.#{name} reads only cpu and mem (C160, C183)")
 
   defp lists_metric(st, node, source, metric) do
     name = direct_target(source, st)

@@ -1475,4 +1475,60 @@ defmodule PerfLang.AnalyzerTest do
       assert %AST.TestSuite{functions: nil, config: nil} = analyzed!(source)
     end
   end
+
+  describe "load generators on workers (C181, C183)" do
+    defp workers_suite(config, verify) do
+      """
+      TestSuite S {
+        Config { #{config} }
+        Load { }
+        Test T { Actions { } Verify { #{verify} } }
+      }
+      """
+    end
+
+    @workers ~s|workers { euWorker1 { host = "10.0.0.11"; } usWorker { host = "10.1.0.11"; } }|
+
+    test "loadGenerator.<worker> reads one worker, loadGenerator all of them" do
+      verify = """
+      assert loadGenerator.euWorker1.cpu.max() < 70%;
+      assert loadGenerator.usWorker.mem.mean() < 80%;
+      assert loadGenerator.cpu.mean() < 50%;
+      """
+
+      assert errors(workers_suite(@workers, verify)) == []
+    end
+
+    test "the worker must be defined, and reads only cpu and mem" do
+      assert [message] = errors(workers_suite(@workers, "assert loadGenerator.nobody.cpu.max() < 70%;"))
+
+      assert message =~
+               "unknown worker nobody; define it in Config { workers { ... } } or pass it with --workers (C183)"
+
+      assert [message] = errors(workers_suite("", "assert loadGenerator.euWorker1.cpu.max() < 70%;"))
+      assert message =~ "unknown worker euWorker1"
+
+      assert [message] = errors(workers_suite(@workers, "assert loadGenerator.euWorker1.gpu.max() < 70%;"))
+      assert message =~ "loadGenerator.euWorker1 reads only cpu and mem (C160, C183)"
+
+      assert [message] = errors(workers_suite(@workers, "let w = loadGenerator.euWorker1;"))
+      assert message =~ "loadGenerator is not a value"
+    end
+
+    test "the workers of an external configuration file replace the suite's (C157, C181)" do
+      suite =
+        workers_suite(
+          ~s|workers { old { host = "10.9.9.9"; } }|,
+          "assert loadGenerator.euWorker1.cpu.max() < 70%;"
+        )
+
+      assert errors(suite, "Config { #{@workers} }") == []
+
+      suite =
+        workers_suite(~s|workers { old { host = "10.9.9.9"; } }|, "assert loadGenerator.old.cpu.max() < 70%;")
+
+      assert [message] = errors(suite, "Config { #{@workers} }")
+      assert message =~ "unknown worker old"
+    end
+  end
 end

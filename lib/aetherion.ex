@@ -93,6 +93,15 @@ defmodule Aetherion do
     end
   end
 
+  @doc "The node names of the workers of the suite's merged Config, name@host (C181)."
+  def workers(%AST.TestSuite{config: nil}), do: []
+
+  def workers(%AST.TestSuite{config: %AST.Config{sections: sections}}) do
+    for %AST.Workers{workers: workers} <- sections,
+        %AST.Worker{name: name, settings: [%AST.Host{value: %AST.StringLiteral{value: host}} | _]} <- workers,
+        do: "#{name}@#{host}"
+  end
+
   @doc "The seed of a run (C179): the seed itself for run 1, so one run replays alone with its own seed."
   def run_seed(seed, 1), do: seed
   def run_seed(seed, run), do: :erlang.phash2({seed, run}, 2_147_483_646) + 1
@@ -340,6 +349,7 @@ defmodule Aetherion do
       # The targets that take requests, so one that got none still shows (C176).
       request_targets: Enum.sort(for({name, %{base_url: url}} <- ctx.rt.targets, url != nil, do: name)),
       load_generator: Monitor.load_generator(monitor),
+      workers: Monitor.workers(monitor),
       verify: Recorder.verify_results(recorder),
       failures: Recorder.failures(recorder)
     }

@@ -505,6 +505,7 @@ defmodule Aetherion.Interpreter do
       case reading.object do
         %AST.Var{name: "sut"} -> :all
         %AST.Var{name: "loadGenerator"} -> :load_generator
+        %AST.Member{object: %AST.Var{name: "loadGenerator"}, name: worker} -> {:load_generator, worker}
         object -> eval(object, env, ctx)
       end
 

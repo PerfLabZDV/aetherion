@@ -355,6 +355,109 @@ defmodule Aetherion.ClusterTest do
     end
   end
 
+  describe "load generators on workers (C181, C183, C184)" do
+    defp name_of(node), do: node |> Atom.to_string() |> String.split("@") |> hd()
+
+    defp workers_section(nodes),
+      do: "workers { " <> Enum.map_join(nodes, " ", &~s|#{name_of(&1)} { host = "127.0.0.1"; }|) <> " }"
+
+    test "the workers are the load generators, all together and each one" do
+      server = server(fn _ -> {:sleep, 2, 200} end)
+      samples = temp("samples.jsonl")
+      {_peers, [first, second] = nodes} = workers(2)
+
+      source =
+        suite(server,
+          output:
+            ~s|output { samples { file = "#{samples}"; } } monitoring { interval = 200ms; } #{workers_section(nodes)}|,
+          load: "stages [ 2vu for 1500ms ]",
+          actions: ~S|sut.api.http.get("/");|,
+          verify: """
+          assert loadGenerator.cpu.max() <= 100%;
+          assert loadGenerator.#{name_of(first)}.mem.max() > 0%;
+          assert loadGenerator.#{name_of(second)}.cpu.mean() >= 0%;
+          """
+        )
+
+      result = run(source, workers: nodes)
+      assert result.exit_code == 0
+
+      test = hd(hd(result.runs).tests)
+      assert Enum.map(test.workers, & &1.name) == Enum.sort([name_of(first), name_of(second)])
+      assert Enum.all?(test.workers, &(&1.readings["cpu"].samples > 0 and &1.readings["mem"].samples > 0))
+
+      each = test.workers |> Enum.map(& &1.readings["mem"].samples) |> Enum.sum()
+      assert test.load_generator["mem"].samples == each
+
+      # The main server sends no load, so it is not sampled (C183).
+      targets =
+        samples |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&JSON.decode!(&1)["target"])
+
+      assert targets |> Enum.uniq() |> Enum.sort() ==
+               Enum.sort(Enum.map(nodes, &"loadGenerator.#{name_of(&1)}"))
+    end
+
+    test "a worker without a sample in the window fails the assert with no value (C164)" do
+      server = server(fn _ -> 200 end)
+      {_peers, nodes} = workers(2)
+
+      # cpu needs two readings an interval apart, and the stage ends first.
+      source =
+        suite(server,
+          output: "monitoring { interval = 10s; } #{workers_section(nodes)}",
+          load: "stages [ 2vu for 300ms ]",
+          actions: ~S|sut.api.http.get("/");|,
+          verify: "assert loadGenerator.cpu.max() < 100%;"
+        )
+
+      result = run(source, workers: nodes)
+      assert result.exit_code == 1
+      assert [%{passed: false}] = hd(hd(result.runs).tests).verify
+    end
+
+    test "the command line connects to the workers of the Config, and --workers replaces them (C184)" do
+      server = server(fn _ -> 200 end)
+      {_peers, [node]} = workers(1)
+      System.put_env("AETHERION_COOKIE", @cookie)
+      on_exit(fn -> System.delete_env("AETHERION_COOKIE") end)
+
+      reading = "assert loadGenerator.#{name_of(node)}.mem.max() > 0%;"
+      body = [load: "stages [ 1vu for 400ms ]", actions: ~S|sut.api.http.get("/");|, verify: reading]
+
+      with_section = temp("with.perf")
+      File.write!(with_section, suite(server, [output: workers_section([node])] ++ body))
+      without = temp("without.perf")
+      File.write!(without, suite(server, body))
+
+      cli = fn args ->
+        ExUnit.CaptureIO.capture_io(fn -> send(self(), {:exit, Aetherion.CLI.main(args)}) end)
+      end
+
+      cli.(["run", with_section])
+      assert_received {:exit, 0}
+
+      cli.(["run", without, "--workers", Atom.to_string(node)])
+      assert_received {:exit, 0}
+
+      # Without workers the reading has no worker to read.
+      output =
+        ExUnit.CaptureIO.capture_io(:stderr, fn ->
+          send(self(), {:exit, Aetherion.CLI.main(["run", without])})
+        end)
+
+      assert_received {:exit, 2}
+      assert output =~ "unknown worker #{name_of(node)}"
+
+      output =
+        ExUnit.CaptureIO.capture_io(:stderr, fn ->
+          send(self(), {:exit, Aetherion.CLI.main(["run", without, "--workers", "eu-worker@10.0.0.11"])})
+        end)
+
+      assert_received {:exit, 2}
+      assert output =~ "eu-worker@10.0.0.11 is not name@host"
+    end
+  end
+
   describe "connect/2" do
     test "explains a worker it cannot reach, a node that is no worker, and a bad name" do
       assert {:error, message} = Cluster.connect(["nobody@127.0.0.1"], cookie: @cookie)

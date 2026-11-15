@@ -497,11 +497,46 @@ defmodule PerfLang.ValidatorTest do
       assert first.message =~ "must be an http:// or https:// URL"
 
       assert second.message ==
-               "an external configuration file holds only the sut and monitoring sections (C157, C178)"
+               "an external configuration file holds only the sut, monitoring and workers sections (C157, C178, C181)"
 
       {:ok, config} = PerfLang.parse_config(~s(Config { runs { count = 3; } }))
       assert {:error, [%Error{message: message}]} = Validator.validate(config)
-      assert message =~ "holds only the sut and monitoring sections"
+      assert message =~ "holds only the sut, monitoring and workers sections"
+
+      {:ok, config} = PerfLang.parse_config(~s(Config { workers { w1 { host = "10.0.0.11"; } } }))
+      assert {:ok, _config} = Validator.validate(config)
+    end
+
+    test "workers: each name once, not a metric, and exactly one host without @ (C181, C183)" do
+      assert config_errors(
+               ~s|Config { workers { euWorker1 { host = "10.0.0.11"; } w2 { host = "w2.example"; } } }|
+             ) ==
+               []
+
+      assert config_errors("Config { workers { } }") == []
+
+      assert [message] =
+               config_errors(~s|Config { workers { w1 { host = "10.0.0.11"; } w1 { host = "10.0.0.12"; } } }|)
+
+      assert message =~ "duplicate worker w1 (first at 1:34) (C181)"
+
+      assert [message] = config_errors(~s|Config { workers { mem { host = "10.0.0.11"; } } }|)
+      assert message =~ "a worker cannot be named mem; loadGenerator.mem reads all workers (C183)"
+
+      assert [message] = config_errors("Config { workers { w1 { } } }")
+      assert message =~ "worker w1 needs a host"
+
+      assert [message] = config_errors(~s|Config { workers { w1 { host = "a"; host = "b"; } } }|)
+      assert message =~ "duplicate host in worker w1 (C181)"
+
+      assert [message] = config_errors(~s|Config { workers { w1 { host = "me@10.0.0.11"; } } }|)
+      assert message =~ "cannot hold @; its node is w1@<host> (C181)"
+
+      assert [message] = config_errors(~s|Config { workers { w1 { host = "http://10.0.0.11"; } } }|)
+      assert message =~ "without scheme or path (C156)"
+
+      assert [message] = config_errors(~s|Config { workers { } workers { } }|)
+      assert message =~ "duplicate Config section workers"
     end
 
     test "runs: each setting once, count at least 1, discard below count (C178)" do

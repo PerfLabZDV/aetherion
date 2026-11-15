@@ -39,6 +39,7 @@ target_settings target_setting base_url_setting host_setting
 metrics_setting metrics_port_setting metric_sources metric_source metric_source_name devices device
 monitoring_section monitoring_settings monitoring_setting carbon_intensity_literal
 runs_section runs_settings runs_setting
+workers_section worker_entries worker_entry worker_settings worker_setting
 topics_setting topic_entries topic_entry mqtt_block mqtt_settings mqtt_setting metric_fields metric_field
 load_statements load_statement
 warmup_setting curves_setting stages_setting think_time_setting
@@ -75,7 +76,7 @@ name ident.
 
 Terminals
 'TestSuite' 'Test' 'Load' 'Setup' 'Actions' 'Verify' 'Cleanup' 'Functions'
-'Config' 'config_file' 'sut' 'baseUrl' 'host' 'samples' 'topics' 'mqtt' 'broker' 'qos' 'metrics' 'metricsPort' 'monitoring' 'interval' 'port' 'path' 'format' 'carbonIntensity' 'output' 'requests' 'summary' 'file' 'fields' 'includeWarmup' 'runs' 'cooldown' 'discard'
+'Config' 'config_file' 'sut' 'baseUrl' 'host' 'samples' 'topics' 'mqtt' 'broker' 'qos' 'metrics' 'metricsPort' 'monitoring' 'interval' 'port' 'path' 'format' 'carbonIntensity' 'output' 'requests' 'summary' 'file' 'fields' 'includeWarmup' 'runs' 'cooldown' 'discard' 'workers'
 'let' 'mut' 'fn' 'if' 'else' 'while' 'for' 'in' 'match' 'return' 'assert' 'check'
 'map' 'filter' 'fold' 'foldl' 'foldr' 'true' 'false' 'null'
 'latency' 'throughput' 'errors' 'energy' 'power' 'carbon' 'asserts' 'checks' 'http'
@@ -152,8 +153,23 @@ config_section -> sut_section    : '$1'.
 config_section -> output_section : '$1'.
 config_section -> monitoring_section : '$1'.
 config_section -> runs_section : '$1'.
+config_section -> workers_section : '$1'.
 
 sut_section -> 'sut' '{' sut_targets '}' : n(sut, '$1', [{targets, '$3'}]).
+
+%% workers { euWorker1 { host = "10.0.0.11"; } } (C181)
+workers_section -> 'workers' '{' worker_entries '}' : n(workers, '$1', [{workers, '$3'}]).
+
+worker_entries -> '$empty'                     : [].
+worker_entries -> worker_entry worker_entries  : ['$1' | '$2'].
+
+worker_entry -> target_name '{' worker_settings '}' :
+    n(worker, loc('$1'), [{name, val('$1')}, {settings, '$3'}]).
+
+worker_settings -> '$empty'                         : [].
+worker_settings -> worker_setting worker_settings   : ['$1' | '$2'].
+
+worker_setting -> host_setting : '$1'.
 
 sut_targets -> '$empty'               : [].
 sut_targets -> sut_target sut_targets : ['$1' | '$2'].
@@ -853,6 +869,7 @@ ident -> 'file'         : '$1'.
 ident -> 'fields'       : '$1'.
 ident -> 'includeWarmup' : '$1'.
 ident -> 'runs'         : '$1'.
+ident -> 'workers'      : '$1'.
 ident -> 'cooldown'     : '$1'.
 ident -> 'discard'      : '$1'.
 ident -> 'fixed'        : '$1'.

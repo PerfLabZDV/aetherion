@@ -57,6 +57,16 @@ defmodule PerfLang.AST do
 
   defmodule Sut, do: defstruct([:loc, targets: []])
 
+  defmodule Workers do
+    @moduledoc "workers { ... }: the machines that run the virtual users (C181)."
+    defstruct [:loc, workers: []]
+  end
+
+  defmodule Worker do
+    @moduledoc "name { host = \"...\"; } inside workers. `settings` keeps source order; duplicates are left for the Validator."
+    defstruct [:loc, :name, settings: []]
+  end
+
   defmodule SutTarget do
     @moduledoc "name { ... } inside sut. `settings` keeps source order; duplicates are left for the Validator."
     defstruct [:loc, :name, settings: []]
@@ -430,6 +440,8 @@ defmodule PerfLang.AST do
     config: Config,
     sut: Sut,
     sut_target: SutTarget,
+    workers: Workers,
+    worker: Worker,
     base_url: BaseUrl,
     host: Host,
     target_metrics: TargetMetrics,

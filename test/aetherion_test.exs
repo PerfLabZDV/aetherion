@@ -647,10 +647,12 @@ defmodule AetherionTest do
       up = suite(server, load: "stages [ 3vu in 30iter ]", actions: ~S|sut.api.http.get("/up");|)
       down = suite(server, load: "stages [ 4vu now, 0vu in 30iter ]", actions: ~S|sut.api.http.get("/down");|)
 
-      for {source, path} <- [{up, "/up"}, {down, "/down"}] do
+      # A user the ramp down takes away between claiming an iteration and its
+      # request ends that iteration with no request; the iteration still started.
+      for {source, path, sent} <- [{up, "/up", 30..30}, {down, "/down", 26..30}] do
         task = Task.async(fn -> run(source) end)
         assert {:ok, %{exit_code: 0}} = Task.yield(task, 10_000) || Task.shutdown(task, :brutal_kill)
-        assert Enum.count(TestServer.requests(server), &(&1.path == path)) == 30
+        assert Enum.count(TestServer.requests(server), &(&1.path == path)) in sent
       end
     end
 
@@ -1265,7 +1267,7 @@ defmodule AetherionTest do
       summary = file |> File.read!() |> JSON.decode!()
 
       assert %{
-               "version" => 3,
+               "version" => 4,
                "suite" => "S",
                "seed" => 42,
                "result" => "passed",
@@ -1283,6 +1285,9 @@ defmodule AetherionTest do
       assert [%{"target" => "api", "url" => "/a", "requests" => %{"n" => 1}}] = aggregate["endpoints"]
 
       assert %{"name" => "T", "result" => "passed", "stoppedBy" => nil} = test
+      # One machine: no workers, and the load generator is this one (C160, C183).
+      assert %{"workers" => [], "loadGenerator" => %{"cpu" => _, "mem" => _}} = test
+      assert aggregate["workers"] == []
 
       assert %{"requests" => 2, "errors" => %{"rate" => +0.0, "count" => 0}, "latency" => %{"p95" => _}} =
                test["metrics"]
@@ -1851,7 +1856,7 @@ defmodule AetherionTest do
       assert Enum.map(lines, & &1["run"]) == [1, 1, 1, 2, 2, 2, 3, 3, 3]
       assert hd(lines) == %{"run" => 1, "test" => "A", "url" => "/a"}
 
-      assert %{"version" => 3, "experiment" => %{"count" => 3}, "runs" => runs, "tests" => [a, _b]} =
+      assert %{"version" => 4, "experiment" => %{"count" => 3}, "runs" => runs, "tests" => [a, _b]} =
                summary |> File.read!() |> JSON.decode!()
 
       assert length(runs) == 3

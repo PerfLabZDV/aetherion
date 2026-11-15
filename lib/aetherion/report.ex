@@ -87,10 +87,11 @@ defmodule Aetherion.Report do
   def write_summary(nil, _summary), do: :ok
   def write_summary(file, summary), do: File.write!(file, JSON.encode!(summary) <> "\n")
 
-  # Layout version 3: every run with its Tests, and each Test across the runs (C180).
+  # Layout version 4: every run with its Tests, and each Test across the runs
+  # (C180), with the readings of each worker (C183).
   def summary(run) do
     %{
-      version: 3,
+      version: 4,
       suite: run.suite,
       seed: run.seed,
       startedAt: DateTime.to_iso8601(run.started_at),
@@ -151,6 +152,7 @@ defmodule Aetherion.Report do
       endpoints: Enum.map(test.snapshot.endpoints, &endpoint/1),
       targets: targets(test),
       loadGenerator: test.load_generator,
+      workers: Map.get(test, :workers, []),
       verify: Enum.map(test.verify, &verify/1),
       failures: Enum.map(test.failures, &failure/1)
     }
@@ -279,6 +281,10 @@ defmodule Aetherion.Report do
     for {metric, stats} <- Enum.sort(test.aggregate.loadGenerator || %{}) do
       estimate(device, "loadGenerator #{metric} mean", stats[:mean], "%")
     end
+
+    for worker <- test.aggregate.workers, {metric, stats} <- Enum.sort(worker[:readings] || %{}) do
+      estimate(device, "loadGenerator #{worker.name} #{metric} mean", stats[:mean], "%")
+    end
   end
 
   defp estimate(_device, _label, nil, _unit), do: :ok
@@ -339,9 +345,13 @@ defmodule Aetherion.Report do
       end
     end
 
-    # The engine's own machine, read without an agent (C160).
+    # The engine's own machine, read without an agent (C160), or all workers and each one (C183).
     for {metric, stats} <- Enum.sort(Map.get(test, :load_generator) || %{}) do
       IO.puts(device, "  loadGenerator #{metric} #{reading(metric, stats)}")
+    end
+
+    for worker <- Map.get(test, :workers, []), {metric, stats} <- Enum.sort(worker.readings) do
+      IO.puts(device, "  loadGenerator #{worker.name} #{metric} #{reading(metric, stats)}")
     end
 
     for entry <- test.verify do

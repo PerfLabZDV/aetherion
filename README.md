@@ -1,12 +1,12 @@
 # Aetherion
 
 Aetherion runs performance tests written in PerfLang. This project holds the language, built from `perflang.ebnf`
-(version 1.35, decisions C1 to C180) with Erlang's built-in generators **leex** for the lexer and **yecc** (LALR(1))
+(version 1.36, decisions C1 to C184) with Erlang's built-in generators **leex** for the lexer and **yecc** (LALR(1))
 for the parser, and its execution engine, which uses Mint for HTTP and emqtt for MQTT. The language lives in the
 `PerfLang` modules and the engine in the `Aetherion` modules.
 
 ```
-perflang.ebnf                  the grammar and decisions C1 to C180
+perflang.ebnf                  the grammar and decisions C1 to C184
 src/perflang_lexer.xrl         token rules (leex)
 src/perflang_parser.yrl        grammar, one nonterminal per EBNF rule (yecc)
 lib/perflang.ex                public API of the language
@@ -33,7 +33,7 @@ lib/aetherion/worker.ex        a worker, and its sessions of virtual users
 lib/aetherion/cli.ex           the command line, and its exit codes
 lib/mix/tasks/aetherion.ex     mix aetherion run
 bin/aetherion                  the same command, and a clean stop on Ctrl+C
-test/                          497 tests; fixtures/full_suite.perf holds every example from the EBNF,
+test/                          506 tests; fixtures/full_suite.perf holds every example from the EBNF,
                                server_helper.exs a local HTTP server and MQTT broker for the engine tests, and
                                cluster_test.exs runs suites on worker nodes on this machine
 examples/                      example suites, e.g. t1-basic-http-get-req.perf, and staging.perfcfg, an external
@@ -80,16 +80,42 @@ reached about 20,000 requests a second with 2000 users. Watch `loadGenerator.cpu
 One machine can be the limit: its CPU, its connections, or where the load comes from. With workers, a main server
 runs the suite and other servers run the virtual users. The main server runs the stages, Setup, Verify, Cleanup,
 stopIf, the monitoring of the system under test and the report, and splits each user count across the workers.
-The workers only run Actions.
+The workers only run Actions (C182).
+
+Workers are a section of the Config, in the suite or in the external configuration file, like `sut` (C181). The name
+and the host make the node name of a worker, `euWorker1@10.0.0.11`:
+
+```
+Config {
+  workers {
+    euWorker1 { host = "10.0.0.11"; }
+    euWorker2 { host = "10.0.0.12"; }
+    usWorker  { host = "10.1.0.11"; }
+  }
+}
+```
 
 ```sh
 # on every worker, left running; the same version of Aetherion on every server
 export AETHERION_COOKIE=...   # a long random secret, the same on every server
-bin/aetherion worker --name worker1@10.0.0.11
+bin/aetherion worker --name euWorker1@10.0.0.11
 
 # on the main server
 export AETHERION_COOKIE=...
-bin/aetherion run shop.perf --config staging.perfcfg --workers worker1@10.0.0.11,worker2@10.0.0.12,worker3@10.0.0.13
+bin/aetherion run shop.perf --config staging.perfcfg
+bin/aetherion run shop.perf --workers euWorker1@10.0.0.11,euWorker2@10.0.0.12   # replaces the section (C184)
+```
+
+With workers, the load generators are the workers, not the main server (C183). `loadGenerator.cpu.max()` reads the
+samples of every worker, as `sut.cpu` reads every target, and `loadGenerator.euWorker1.cpu.max()` one worker. Each
+worker samples `cpu` and `mem` at the monitoring interval while it runs users. The report and the summary show all
+workers together and each one.
+
+```
+Verify {
+  assert loadGenerator.cpu.max() < 70%;            // every worker
+  assert loadGenerator.usWorker.mem.max() < 80%;   // one worker
+}
 ```
 
 With `stages [ 2000vu for 5m ]` and three workers, each runs 667 users, the first one more. Users are numbered
@@ -117,11 +143,8 @@ A worker that goes away ends the run with exit code 2, as a run that cannot fini
 their users. Ctrl+C on the main server stops the users on every worker, and Cleanup runs (C155). Workers stay up for
 the next run.
 
-Not across workers:
-
-* An `add` from Actions to a list of Setup (C137) reaches Verify and Cleanup, but not the users of other workers during
-  the run.
-* `loadGenerator.cpu` and `loadGenerator.mem` read the main server, which sends no load.
+Not across workers: an `add` from Actions to a list of Setup (C137) reaches Verify and Cleanup, but not the users of
+other workers during the run.
 
 ## Usage
 
@@ -163,8 +186,8 @@ Enum.map(errors, &PerfLang.Error.format/1)
 ## External configuration
 
 Targets can live outside the suite, so one test runs against several environments unchanged (C157). An external
-configuration file holds one `Config` block, in the same syntax as in a suite, and for now only its `sut` and
-`monitoring` sections. Its name is free; `.perfcfg` is the convention.
+configuration file holds one `Config` block, in the same syntax as in a suite, and only its `sut`, `monitoring` and
+`workers` (C181) sections. Its name is free; `.perfcfg` is the convention.
 
 ```
 Config {
@@ -233,7 +256,7 @@ Machine metrics are read like `cpu` (C109, C160), in Verify, `stopIf` and Cleanu
 assert sut.euCentralDb.mem.max() < 80%;       // one target
 assert sut.mem.mean() < 50%;                  // all targets that list it
 assert sut.euCentralApp.power.mean() < 200W;  // power gives a Power
-assert loadGenerator.cpu.max() < 70%;         // read locally, no agent
+assert loadGenerator.cpu.max() < 70%;         // read locally, no agent; with workers, on the workers (C183)
 ```
 
 `energy.total()` integrates the power samples of every target that lists `power`, and `carbon.total()` multiplies
@@ -410,13 +433,14 @@ cannot pass by accident. Once Verify has a criterion, only Verify decides: a Tes
 
 ## Summary file
 
-The summary is one JSON object (C121). `version` changes with the layout; this is version 3, the same for one run or
-several (C180). Times are in milliseconds, percentages are numbers from 0 to 100, energy is in joules, power in watts
-and carbon in grams of CO2e. `runs` holds every run with its Tests, and `tests` each Test across the counted runs.
+The summary is one JSON object (C121). `version` changes with the layout; this is version 4, the same for one run or
+several (C180), which adds `workers` to each Test of version 3 (C183). Times are in milliseconds, percentages are
+numbers from 0 to 100, energy is in joules, power in watts and carbon in grams of CO2e. `runs` holds every run with its
+Tests, and `tests` each Test across the counted runs. `workers` is empty for a run on one machine.
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "suite": "ShopCheckout",
   "seed": 42,
   "startedAt": "2026-10-31T10:00:00Z",
@@ -453,7 +477,8 @@ and carbon in grams of CO2e. `runs` holds every run with its Tests, and `tests` 
         },
         "endpoints": [ { "target": "shop", "method": "GET", "url": "/api/products", "requests": { "n": 10 } } ],
         "targets": [ { "name": "euCentralApp", "readings": { "cpu": { "mean": { "n": 10 } } } } ],
-        "loadGenerator": { "cpu": { "mean": { "n": 10 } } }
+        "loadGenerator": { "cpu": { "mean": { "n": 10 } } },
+        "workers": [ { "name": "euWorker1", "readings": { "cpu": { "mean": { "n": 10 } } } } ]
       }
     }
   ]
@@ -521,6 +546,9 @@ is null for a machine that only is measured.
     }
   ],
   "loadGenerator": { "cpu": { "mean": 12.0, "max": 33.1 }, "mem": { "mean": 18.0, "max": 19.4 } },
+  "workers": [
+    { "name": "euWorker1", "readings": { "cpu": { "mean": 12.0, "max": 33.1, "samples": 300 } } }
+  ],
   "verify": [
     {
       "kind": "assert",
@@ -689,8 +717,9 @@ mistake gives one error rather than a chain of them. It checks:
 * Targets (C143, C156, C158): every target is in Config or in the external file. Written as `sut.<target>`, http calls
   and `distribution` need a `baseUrl`. Metrics from an agent need a `format`, a port and any `fields` they need, and
   `topics` need `mqtt`. `sut.any` works in Actions, with a `distribution` (C168).
-* Machine metrics (C160, C161): a reading needs a target that lists the metric, and `loadGenerator` reads `cpu` and
-  `mem`. `energy`, `power` and `carbon` metrics need a target that lists `power`, and `carbon` needs `carbonIntensity`.
+* Machine metrics (C160, C161, C183): a reading needs a target that lists the metric, and `loadGenerator` reads `cpu`
+  and `mem`; `loadGenerator.euWorker1` needs a worker of that name. `energy`, `power` and `carbon` metrics need a
+  target that lists `power`, and `carbon` needs `carbonIntensity`.
 * Built-ins (C144, C145): `range`, the math built-ins in every expression, `.length()`, `.contains(x)` and `+` on
   strings.
 * `toString()` (C177): no arguments, on a number, Bool, String, Json or unit value; List, Response, Target, Fn and

@@ -982,4 +982,24 @@ defmodule PerfLang.ParserTest do
       assert parse_error(suite("match a { }")).message =~ ~s(unexpected "}")
     end
   end
+
+  describe "workers (C181)" do
+    test "a workers section holds named workers with a host" do
+      source = ~s|Config { workers { euWorker1 { host = "10.0.0.11"; } usWorker { host = "10.1.0.11"; } } }|
+
+      assert {:ok, %AST.Config{sections: [%AST.Workers{workers: [first, second]}]}} =
+               PerfLang.parse_config(source)
+
+      assert %AST.Worker{
+               name: "euWorker1",
+               settings: [%AST.Host{value: %AST.StringLiteral{value: "10.0.0.11"}}]
+             } = first
+
+      assert %AST.Worker{name: "usWorker", loc: {1, 54}} = second
+    end
+
+    test "workers stays usable as a name" do
+      assert {:ok, _ast} = PerfLang.parse("TestSuite S { Load { } Test T { Actions { let workers = 1; } } }")
+    end
+  end
 end

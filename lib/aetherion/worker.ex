@@ -13,7 +13,7 @@ defmodule Aetherion.Worker do
   users at once.
   """
 
-  alias Aetherion.{Cluster, Load, Recorder}
+  alias Aetherion.{Cluster, Load, Monitor, Recorder}
 
   @forward_ms 50
   @ready {__MODULE__, :ready}
@@ -75,7 +75,11 @@ defmodule Aetherion.Worker do
       requests?: job.requests?,
       # The main server's number of the open count stage, and the last progress sent.
       stage: nil,
-      sent: nil
+      sent: nil,
+      # This worker is a load generator (C183): its samples wait here for the next report.
+      name: Node.self() |> Atom.to_string() |> String.split("@") |> hd(),
+      sampler: start_sampler(self(), ctx.rt.monitoring.interval_ms),
+      samples: []
     }
 
     Process.send_after(self(), :forward, @forward_ms)
@@ -92,6 +96,10 @@ defmodule Aetherion.Worker do
 
       :free ->
         loop(%{state | users: Load.free(state.users), stage: nil})
+
+      {:sample, readings, at, wall} ->
+        samples = for {metric, value} <- readings, do: {state.name, metric, value, at + state.offset, wall}
+        loop(%{state | samples: state.samples ++ samples})
 
       :forward ->
         state = forward(state)
@@ -112,23 +120,40 @@ defmodule Aetherion.Worker do
     end
   end
 
-  # Sends only when there is something new: requests, or progress in a count stage.
+  # Sends only when there is something new: requests, samples, or progress in a count stage.
   defp forward(state) do
     rows = Recorder.take_counted(state.recorder)
     progress = if state.stage, do: Map.put(Load.progress(state.users), :stage, state.stage)
 
-    if rows != [] or progress != state.sent do
-      send(state.controller, {:aetherion_progress, self(), Map.put(progress || %{stage: nil}, :rows, rows)})
+    if rows != [] or state.samples != [] or progress != state.sent do
+      report = Map.merge(progress || %{stage: nil}, %{rows: rows, samples: state.samples})
+      send(state.controller, {:aetherion_progress, self(), report})
     end
 
-    %{state | sent: progress}
+    %{state | sent: progress, samples: []}
+  end
+
+  # cpu and mem of this machine at the monitoring interval (C158, C183).
+  defp start_sampler(session, interval_ms), do: spawn_link(fn -> sample(session, interval_ms, nil) end)
+
+  defp sample(session, interval_ms, previous) do
+    {readings, previous} = Monitor.sample_machine(previous)
+
+    if readings != [],
+      do: send(session, {:sample, readings, Recorder.now(), DateTime.to_iso8601(DateTime.utc_now())})
+
+    Process.sleep(interval_ms)
+    sample(session, interval_ms, previous)
   end
 
   defp finish(state) do
     Load.stop_users(state.users)
+    stop_sampler(state)
+    state = drain_samples(state)
 
     result = %{
       counted: Recorder.take_counted(state.recorder),
+      samples: state.samples,
       recorder: Recorder.export(state.recorder, state.offset, state.requests?),
       vars: for({name, value, at} <- :ets.tab2list(state.vars), do: {name, value, at + state.offset}),
       cell_adds: for({key, _value} = row <- :ets.tab2list(state.cells), key not in state.copied, do: row)
@@ -137,7 +162,23 @@ defmodule Aetherion.Worker do
     send(state.controller, {:aetherion_done, self(), result})
   end
 
+  defp stop_sampler(%{sampler: sampler}) do
+    Process.unlink(sampler)
+    Process.exit(sampler, :kill)
+  end
+
+  defp drain_samples(state) do
+    receive do
+      {:sample, readings, at, wall} ->
+        samples = for {metric, value} <- readings, do: {state.name, metric, value, at + state.offset, wall}
+        drain_samples(%{state | samples: state.samples ++ samples})
+    after
+      0 -> state
+    end
+  end
+
   defp abort(state) do
+    stop_sampler(state)
     Enum.each(state.users.users ++ state.users.stopping, &Process.exit(&1, :kill))
   end
 end

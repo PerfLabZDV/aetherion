@@ -6,6 +6,10 @@ defmodule Aetherion.Monitor do
   arrives, and the load generator is read locally. Sampling runs from Setup to
   Cleanup; readings and energy use only the samples inside the measured window
   (C162). Every sample is kept in an ETS table, for the samples file (C173).
+
+  With workers the load generators are the workers (C183): this machine is not
+  sampled, and each worker sends its samples, kept as the target
+  `loadGenerator.<worker>`.
   """
 
   alias Aetherion.{Http, Recorder, Values}
@@ -30,7 +34,7 @@ defmodule Aetherion.Monitor do
     agents =
       for {name, target} <- rt.targets, agent_metrics(target) != [], do: start_agent(monitor, name, target)
 
-    pids = [start_local(monitor) | agents]
+    pids = if rt.workers == [], do: [start_local(monitor) | agents], else: agents
 
     try do
       %{monitor | pids: pids, mqtt: start_mqtt(monitor)}
@@ -77,14 +81,34 @@ defmodule Aetherion.Monitor do
   def set_phase(%{phase: phase}, name), do: :atomics.put(phase, 1, @phases[name])
 
   defp store(monitor, target, metric, value) do
-    key = {Recorder.now(), :erlang.unique_integer([:monotonic])}
-    wall = DateTime.utc_now() |> DateTime.to_iso8601()
+    store(monitor, target, metric, value, Recorder.now(), DateTime.utc_now() |> DateTime.to_iso8601())
+  end
+
+  defp store(monitor, target, metric, value, at, wall) do
+    key = {at, :erlang.unique_integer([:monotonic])}
 
     :ets.insert(
       monitor.table,
       {key, target, metric, value, wall, @phase_names[:atomics.get(monitor.phase, 1)]}
     )
   end
+
+  @doc """
+  Stores the samples a worker sent, `{worker, metric, value, at, wall}` with `at` on this
+  node's clock (C183).
+  """
+  def store_samples(monitor, samples) do
+    for {worker, metric, value, at, wall} <- samples,
+        do: store(monitor, worker_target(worker), metric, value, at, wall)
+
+    :ok
+  end
+
+  defp worker_target(worker), do: @load_generator <> "." <> worker
+
+  # The names of the workers, the name part of each node name, name@host (C181).
+  defp worker_names(%{rt: %{workers: workers}}),
+    do: for(node <- workers, do: node |> Atom.to_string() |> String.split("@") |> hd())
 
   # ---------- Agents (C158, C159) ----------
 
@@ -282,35 +306,41 @@ defmodule Aetherion.Monitor do
   end
 
   defp local_loop(monitor, previous) do
-    previous = local_cpu(monitor, previous)
-
-    case local_mem() do
-      nil -> :ok
-      value -> store(monitor, @load_generator, "mem", value)
-    end
-
+    {readings, previous} = sample_machine(previous)
+    for {metric, value} <- readings, do: store(monitor, @load_generator, metric, value)
     Process.sleep(monitor.rt.monitoring.interval_ms)
     local_loop(monitor, previous)
   end
 
-  defp local_cpu(monitor, previous) do
+  @doc """
+  Reads cpu and mem of this machine: `{[{metric, value}], previous}`. cpu needs the
+  counters of the reading before, so the first reading has only mem.
+  """
+  def sample_machine(previous) do
+    {cpu, previous} = local_cpu(previous)
+    readings = [{"cpu", cpu}, {"mem", local_mem()}]
+    {for({metric, value} <- readings, value != nil, do: {metric, value}), previous}
+  end
+
+  defp local_cpu(previous) do
     with {:ok, text} <- File.read("/proc/stat"),
          ["cpu" | fields] <- text |> String.split("\n") |> hd() |> String.split() do
       numbers = Enum.map(fields, &String.to_integer/1)
       total = Enum.sum(numbers)
       idle = Enum.at(numbers, 3) + Enum.at(numbers, 4, 0)
 
-      case previous do
-        {last_idle, last_total} when total > last_total ->
-          store(monitor, @load_generator, "cpu", (1 - (idle - last_idle) / (total - last_total)) * 100)
+      cpu =
+        case previous do
+          {last_idle, last_total} when total > last_total ->
+            (1 - (idle - last_idle) / (total - last_total)) * 100
 
-        _ ->
-          :ok
-      end
+          _ ->
+            nil
+        end
 
-      {idle, total}
+      {cpu, {idle, total}}
     else
-      _ -> previous
+      _ -> {nil, previous}
     end
   end
 
@@ -436,7 +466,9 @@ defmodule Aetherion.Monitor do
     for {name, target} <- monitor.rt.targets, Enum.any?(target.metrics, &(&1.name == metric)), do: name
   end
 
-  defp covered(_monitor, :load_generator, _metric), do: [@load_generator]
+  defp covered(%{rt: %{workers: []}}, :load_generator, _metric), do: [@load_generator]
+  defp covered(monitor, :load_generator, _metric), do: Enum.map(worker_names(monitor), &worker_target/1)
+  defp covered(_monitor, {:load_generator, worker}, _metric), do: [worker_target(worker)]
   defp covered(monitor, :all, metric), do: listing(monitor, metric)
   defp covered(_monitor, {:target, name}, _metric), do: [name]
 
@@ -585,11 +617,28 @@ defmodule Aetherion.Monitor do
     %{mean: Enum.sum(values) / length(values), max: Enum.max(values), samples: length(values)}
   end
 
-  @doc "The load generator's readings, for the summary."
+  @doc "The load generator's readings, for the summary: of every worker together, with workers (C183)."
   def load_generator(monitor) do
     Map.new(["cpu", "mem"], fn metric ->
-      {metric, monitor |> samples(@load_generator, metric) |> Enum.map(&elem(&1, 1)) |> stats()}
+      values =
+        for target <- covered(monitor, :load_generator, metric),
+            {_at, value} <- samples(monitor, target, metric),
+            do: value
+
+      {metric, stats(values)}
     end)
+  end
+
+  @doc "The readings of each worker, by name, for the summary (C183); none without workers."
+  def workers(monitor) do
+    for name <- monitor |> worker_names() |> Enum.sort() do
+      readings =
+        Map.new(["cpu", "mem"], fn metric ->
+          {metric, monitor |> samples(worker_target(name), metric) |> Enum.map(&elem(&1, 1)) |> stats()}
+        end)
+
+      %{name: name, readings: readings}
+    end
   end
 
   @doc "All samples in time order, for the samples file (C173)."

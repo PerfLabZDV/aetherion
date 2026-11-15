@@ -5,10 +5,12 @@ defmodule Aetherion.CLI do
   Returns the exit code of C132: 0 when every Test passed, 1 when a Test failed,
   2 when the run could not start or finish.
 
-  `--workers w1@10.0.0.11,w2@10.0.0.12` runs the virtual users on workers, each
-  started with `aetherion worker --name w1@10.0.0.11`, which waits for runs. Main
-  server and workers share a cookie, from `$AETHERION_COOKIE` or `--cookie`, and
-  `--name` names the main server's node (`Aetherion.Cluster`).
+  The virtual users run on the workers of the Config, `workers { w1 { host =
+  "10.0.0.11"; } }` (C181), each started with `aetherion worker --name
+  w1@10.0.0.11`, which waits for runs. `--workers w1@10.0.0.11,w2@10.0.0.12`
+  replaces that section (C184). Main server and workers share a cookie, from
+  `$AETHERION_COOKIE` or `--cookie`, and `--name` names the main server's node
+  (`Aetherion.Cluster`).
   """
 
   alias Aetherion.{Cluster, Worker}
@@ -31,9 +33,7 @@ defmodule Aetherion.CLI do
   def main(["run" | args]) do
     case OptionParser.parse(args, strict: @run_options) do
       {options, [file], []} ->
-        if options[:workers] || not (Keyword.has_key?(options, :cookie) or Keyword.has_key?(options, :name)),
-          do: run(file, options),
-          else: usage()
+        run(file, options)
 
       _ ->
         usage()
@@ -63,9 +63,10 @@ defmodule Aetherion.CLI do
     with {:ok, ast} <- PerfLang.parse_file(file) |> one(),
          {:ok, ast} <- PerfLang.validate(ast),
          {:ok, config} <- config(options[:config]),
+         {:ok, config} <- command_line_workers(config, options[:workers]),
          {:ok, ast} <- PerfLang.analyze(ast, config: config),
          {:ok, _plan} <- plan(ast, options[:runs]),
-         {:ok, workers} <- workers(options) do
+         {:ok, workers} <- workers(ast, options) do
       {:ok, _started} = Application.ensure_all_started(:ssl)
       Aetherion.run(ast, seed: options[:seed], runs: options[:runs], workers: workers).exit_code
     else
@@ -94,13 +95,55 @@ defmodule Aetherion.CLI do
     end
   end
 
-  defp workers(options) do
-    case options[:workers] do
-      nil ->
-        {:ok, []}
+  # --workers replaces the workers section (C184): each node name, name@host, is a
+  # worker, written as one so the Validator checks it like any other.
+  defp command_line_workers(config, nil), do: {:ok, config}
 
-      list ->
-        case Cluster.connect(String.split(list, ","), name: options[:name], cookie: options[:cookie]) do
+  defp command_line_workers(config, list) do
+    nodes = for node <- String.split(list, ","), node = String.trim(node), node != "", do: node
+
+    case Enum.find(nodes, &(not String.match?(&1, ~r/^[A-Za-z][A-Za-z0-9_]*@[^@\s"]+$/))) do
+      nil when nodes != [] ->
+        entries = Enum.map_join(nodes, " ", &worker_entry/1)
+        {:ok, section} = PerfLang.parse_config("Config { workers { #{entries} } }")
+
+        case PerfLang.validate(section) do
+          {:ok, section} -> {:ok, with_workers(config, section)}
+          {:error, errors} -> {:error, :workers, "--workers: " <> Enum.map_join(errors, "; ", & &1.message)}
+        end
+
+      nil ->
+        {:error, :workers, "--workers needs at least one worker, such as euWorker1@10.0.0.11 (C184)"}
+
+      bad ->
+        {:error, :workers,
+         "--workers: #{bad} is not name@host with a name such as euWorker1, letters, digits and _ (C184)"}
+    end
+  end
+
+  defp worker_entry(node) do
+    [name, host] = String.split(node, "@")
+    ~s|#{name} { host = "#{host}"; }|
+  end
+
+  defp with_workers(nil, section), do: section
+
+  defp with_workers(%PerfLang.AST.Config{sections: sections} = config, %PerfLang.AST.Config{
+         sections: [workers]
+       }),
+       do: %{config | sections: Enum.reject(sections, &match?(%PerfLang.AST.Workers{}, &1)) ++ [workers]}
+
+  # The workers of the merged Config (C181), connected before any Test starts (C184).
+  defp workers(ast, options) do
+    case Aetherion.workers(ast) do
+      [] ->
+        if options[:cookie] || options[:name],
+          do:
+            {:error, :workers, "--cookie and --name are for runs on workers; the suite has no workers (C181)"},
+          else: {:ok, []}
+
+      nodes ->
+        case Cluster.connect(nodes, name: options[:name], cookie: options[:cookie]) do
           {:ok, nodes} -> {:ok, nodes}
           {:error, message} -> {:error, :workers, message}
         end
