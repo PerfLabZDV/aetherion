@@ -5,6 +5,21 @@ Aetherion runs performance tests written in PerfLang. This project holds the lan
 for the parser, and its execution engine, which uses Mint for HTTP and emqtt for MQTT. The language lives in the
 `PerfLang` modules and the engine in the `Aetherion` modules.
 
+## Quick start
+
+On a main server deployed with the Debian package and Ansible (see [Deployment on Debian 13](#deployment-on-debian-13)),
+load the shared cookie from `/etc/aetherion/main.env` into the shell, then run a suite:
+
+```sh
+set -a; . /etc/aetherion/main.env; set +a
+aetherion run examples/mixed-workload.perf
+```
+
+Without the cookie, the run stops with `workers need a shared cookie: set AETHERION_COOKIE, or pass --cookie`. The
+file is readable by root and the group `aetherion`; a user added to the group must log in again first.
+
+## Layout
+
 ```
 perflang.ebnf                  the grammar and decisions C1 to C184
 src/perflang_lexer.xrl         token rules (leex)
