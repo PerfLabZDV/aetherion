@@ -1,12 +1,12 @@
 #!/bin/sh
 # Builds the Debian 13 package and deploys it to the servers of packaging/ansible/inventory.yml.
 #
-#   packaging/deploy.sh                       # build, then deploy to every server
-#   packaging/deploy.sh --limit euWorker1     # arguments go to ansible-playbook
-#   packaging/deploy.sh --check --diff        # what a deployment would change
-#   packaging/deploy.sh --ask-become-pass     # when sudo on the servers asks for a password
-#   RUN_TESTS=1 packaging/deploy.sh           # run the tests in the build first
-#   SKIP_BUILD=1 packaging/deploy.sh          # deploy the package that is built already
+#   packaging/build-and-deploy.sh                       # build, then deploy to every server
+#   packaging/build-and-deploy.sh --limit euWorker1     # arguments go to ansible-playbook
+#   packaging/build-and-deploy.sh --check --diff        # what a deployment would change
+#   packaging/build-and-deploy.sh --ask-become-pass     # when sudo on the servers asks for a password
+#   RUN_TESTS=1 packaging/build-and-deploy.sh           # run the tests in the build first
+#   SKIP_BUILD=1 packaging/build-and-deploy.sh          # deploy the package that is built already
 #
 # Needs Docker and Ansible. See packaging/ansible/README.md for the inventory and the cookie.
 set -eu
