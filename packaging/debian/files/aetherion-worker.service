@@ -1,0 +1,33 @@
+[Unit]
+Description=Aetherion worker: runs the virtual users of a main server
+Documentation=file:///usr/share/doc/aetherion/README.Debian
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aetherion
+Group=aetherion
+# AETHERION_NAME, AETHERION_COOKIE and the distribution port.
+EnvironmentFile=/etc/aetherion/worker.env
+Environment=HOME=/var/lib/aetherion
+StateDirectory=aetherion
+WorkingDirectory=/var/lib/aetherion
+ExecStart=/usr/bin/aetherion worker --name ${AETHERION_NAME}
+Restart=on-failure
+RestartSec=5
+# 2: the worker cannot start, such as without a name or a cookie; restarting would not help.
+RestartPreventExitStatus=2
+# Every virtual user holds a connection of its own.
+LimitNOFILE=1048576
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -16,9 +16,9 @@ defmodule Aetherion.CLI do
   alias Aetherion.{Cluster, Worker}
 
   @usage """
-  usage: mix aetherion run file.perf [--config file.perfcfg] [--seed n] [--runs n]
-                                     [--workers name@host,... [--cookie c] [--name name@host]]
-         mix aetherion worker --name name@host [--cookie c]\
+  usage: aetherion run file.perf [--config file.perfcfg] [--seed n] [--runs n]
+                                 [--workers name@host,...] [--cookie c] [--name name@host]
+         aetherion worker --name name@host [--cookie c]\
   """
 
   @run_options [

@@ -1,0 +1,23 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = configure ]; then
+  getent group aetherion >/dev/null || groupadd --system aetherion
+  getent passwd aetherion >/dev/null ||
+    useradd --system --gid aetherion --home-dir /var/lib/aetherion --no-create-home \
+      --shell /usr/sbin/nologin --comment "Aetherion worker" aetherion
+
+  # The cookie is a secret: readable by the worker, not by everyone.
+  chown root:aetherion /etc/aetherion/worker.env
+  chmod 0640 /etc/aetherion/worker.env
+
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null || true
+    # A worker runs the same code as its main server (C184), so an upgrade restarts it.
+    if systemctl is-active --quiet aetherion-worker; then
+      systemctl restart aetherion-worker || true
+    fi
+  fi
+fi
+
+exit 0

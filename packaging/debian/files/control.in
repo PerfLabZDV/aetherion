@@ -1,0 +1,16 @@
+Package: aetherion
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: amd64
+Maintainer: PerfLabZDV
+Depends: @DEPENDS@
+Installed-Size: @SIZE@
+Homepage: https://github.com/PerfLabZDV/aetherion
+Description: performance tests in PerfLang, on one machine or on workers
+ Aetherion runs performance test suites written in PerfLang: virtual users,
+ stages, request metrics, machine and energy metrics, and pass criteria.
+ .
+ The aetherion command runs a suite on this machine, or on workers: other
+ servers with this package whose aetherion-worker service runs the virtual
+ users for it. The package holds its own Erlang runtime.

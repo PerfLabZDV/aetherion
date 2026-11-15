@@ -13,8 +13,16 @@ defmodule Aetherion.MixProject do
       # src/perflang_lexer.xrl and src/perflang_parser.yrl are compiled by
       # Mix's built-in :leex and :yecc compilers.
       compilers: [:leex, :yecc] ++ Mix.compilers(),
-      deps: deps()
+      deps: deps(),
+      releases: releases()
     ]
+  end
+
+  # One release for the main server and the workers: `aetherion run` and
+  # `aetherion worker` start it with eval (Aetherion.Release), packaged for
+  # Debian by packaging/debian/build.sh.
+  defp releases do
+    [aetherion: [include_executables_for: [:unix], include_erts: true]]
   end
 
   def application do

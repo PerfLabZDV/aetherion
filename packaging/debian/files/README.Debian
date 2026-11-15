@@ -1,0 +1,90 @@
+Aetherion on Debian 13
+======================
+
+The package holds Aetherion with its own Erlang runtime in /opt/aetherion, the
+aetherion command, and the aetherion-worker service, which is off until you
+enable it. The same package goes on the main server and on every worker.
+
+    sudo apt install ./aetherion_<version>-1_amd64.deb
+
+
+One machine
+-----------
+
+    aetherion run shop.perf --config staging.perfcfg --seed 42
+
+Paths are relative to the directory you run it in. Ctrl+C stops the run
+cleanly: the users finish their requests and Cleanup runs. The exit code is 0
+when every Test passed, 1 when a Test failed and 2 when the run could not start
+or finish.
+
+
+A main server and workers
+-------------------------
+
+The main server runs the suite; the workers run its virtual users. Generate one
+secret for all of them:
+
+    openssl rand -hex 32
+
+On every worker, set its name and the secret in /etc/aetherion/worker.env:
+
+    AETHERION_NAME=euWorker1@10.0.0.11     # name@host, host = this machine's address
+    AETHERION_COOKIE=<the secret>
+
+and start the service, which also starts at boot:
+
+    sudo systemctl enable --now aetherion-worker
+    journalctl -u aetherion-worker          # "Aetherion worker euWorker1@10.0.0.11 is ready"
+
+On the main server, name the workers in the suite's Config or in the external
+configuration file:
+
+    Config {
+      workers {
+        euWorker1 { host = "10.0.0.11"; }
+        euWorker2 { host = "10.0.0.12"; }
+        euWorker3 { host = "10.0.0.13"; }
+      }
+    }
+
+and run with the same secret:
+
+    export AETHERION_COOKIE=<the secret>
+    aetherion run shop.perf --config cluster.perfcfg
+
+--workers euWorker1@10.0.0.11,euWorker2@10.0.0.12 replaces the workers of the
+Config for one run. The main server checks that it reaches every worker, and
+that every worker runs the same version, before any Test starts.
+
+
+Firewall
+--------
+
+On every worker, let the main server in on:
+
+    4369/tcp    epmd, which tells the main server the worker's port
+    4370/tcp    the worker, set in /etc/aetherion/worker.env
+
+The main server needs no open port: it opens the connections. For example, with
+nftables or ufw on a worker:
+
+    sudo ufw allow from 10.0.0.10 to any port 4369,4370 proto tcp
+
+The secret is the only check, and nothing is encrypted. Keep the servers on a
+private network, or connect them with a VPN such as WireGuard.
+
+
+Upgrades
+--------
+
+Upgrade every server to the same version: the main server refuses a worker that
+runs other code. Installing the package again restarts a running worker. Your
+/etc/aetherion/worker.env is kept.
+
+
+Removal
+-------
+
+    sudo apt remove aetherion     # keeps /etc/aetherion/worker.env
+    sudo apt purge aetherion      # removes it too

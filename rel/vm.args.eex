@@ -1,0 +1,8 @@
+## Flags of the Erlang VM for the release (packaging/debian).
+
+## Ctrl+C must not open the VM's break menu: the aetherion command turns it into
+## SIGTERM, which stops a run cleanly and still runs Cleanup (C155).
++Bi
+
+## One process per virtual user: room for many.
++P 5000000

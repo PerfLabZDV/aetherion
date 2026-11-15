@@ -24,6 +24,7 @@ lib/aetherion/monitor.ex       machine metrics: agents, MQTT plugs, the load gen
 lib/aetherion/recorder.ex      what a Test records, and the metrics read from it
 lib/aetherion/stats.ex         statistics across runs
 lib/aetherion/report.ex        requests and samples files, summary, console report
+lib/aetherion/requests_file.ex the requests file, written during each Test
 lib/aetherion/signals.ex       a clean stop on SIGTERM
 lib/aetherion/cells.ex         `let mut` lists, the only values `add` changes
 lib/aetherion/values.ex        run-time values and their operators
@@ -31,9 +32,12 @@ lib/aetherion/source.ex        source text of an AST node, for messages
 lib/aetherion/cluster.ex       the main server's side of a run on workers
 lib/aetherion/worker.ex        a worker, and its sessions of virtual users
 lib/aetherion/cli.ex           the command line, and its exit codes
+lib/aetherion/release.ex       the command line of the release, for the Debian package
 lib/mix/tasks/aetherion.ex     mix aetherion run
 bin/aetherion                  the same command, and a clean stop on Ctrl+C
-test/                          506 tests; fixtures/full_suite.perf holds every example from the EBNF,
+rel/vm.args.eex                flags of the Erlang VM of the release
+packaging/debian/              the Debian 13 package: build.sh, and the files it installs
+test/                          509 tests; fixtures/full_suite.perf holds every example from the EBNF,
                                server_helper.exs a local HTTP server and MQTT broker for the engine tests, and
                                cluster_test.exs runs suites on worker nodes on this machine
 examples/                      example suites, e.g. t1-basic-http-get-req.perf, and staging.perfcfg, an external
@@ -136,7 +140,7 @@ workers to within about a millisecond, and Verify reads an Actions variable from
 worker (C136).
 
 The nodes talk over Erlang distribution: port 4369 (epmd) and one port per node, which can be fixed for a firewall
-with `ELIXIR_ERL_OPTIONS="-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100"`. The cookie is the only check
+with `ELIXIR_ERL_OPTIONS="-kernel inet_dist_listen_min 4370 inet_dist_listen_max 4370"`. The cookie is the only check
 and nothing is encrypted, so keep the nodes on a private network or a VPN such as WireGuard. `--name main@10.0.0.10`
 names the main server's node; by default it is named after the address that reaches the first worker. `--cookie` works
 too, but shows in the process list.
@@ -147,6 +151,31 @@ the next run.
 
 Not across workers: an `add` from Actions to a list of Setup (C137) reaches Verify and Cleanup, but not the users of
 other workers during the run.
+
+## Deployment on Debian 13
+
+`packaging/debian/build.sh` builds a Debian 13 package, `packaging/debian/dist/aetherion_0.1.0-1_amd64.deb`, in a Debian
+13 container, so it needs only Docker. The package holds a release with its own Erlang runtime, so the servers need no
+Erlang, Elixir or build tools. The same package goes on the main server and on every worker:
+
+```sh
+packaging/debian/build.sh                # RUN_TESTS=1 runs the tests first, on Debian's Elixir 1.18
+
+sudo apt install ./aetherion_0.1.0-1_amd64.deb
+aetherion run shop.perf --config staging.perfcfg      # the same command line as bin/aetherion
+```
+
+On a worker, `/etc/aetherion/worker.env` holds its node name, the cookie and its distribution port, 4370, and the
+`aetherion-worker` service runs it as the system user `aetherion`:
+
+```sh
+sudoedit /etc/aetherion/worker.env       # AETHERION_NAME=euWorker1@10.0.0.11, AETHERION_COOKIE=...
+sudo systemctl enable --now aetherion-worker
+```
+
+A worker accepts the main server on ports 4369 and 4370; the main server needs no open port. Installing the package
+again restarts a running worker, and every server must run the same version. The package's guide,
+`/usr/share/doc/aetherion/README.Debian` (`packaging/debian/files/README.Debian`), has the details.
 
 ## Usage
 

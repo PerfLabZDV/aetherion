@@ -1,0 +1,22 @@
+#!/bin/sh
+# aetherion run file.perf [...] and aetherion worker --name name@host, from the
+# release in /opt/aetherion. Paths stay relative to where it is called (C119).
+#
+# The Erlang VM cannot catch SIGINT, so a plain Ctrl+C would skip Cleanup. This
+# keeps the VM from seeing it and sends SIGTERM, which stops a run cleanly (C155).
+
+# Aetherion sets the cookie of a run on workers itself, from AETHERION_COOKIE or
+# --cookie; until it does, the VM has that one, or a random one, never a known one.
+RELEASE_COOKIE="${AETHERION_COOKIE:-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')}"
+export RELEASE_COOKIE
+
+/opt/aetherion/bin/aetherion eval 'Aetherion.Release.main()' "$@" &
+pid=$!
+trap 'kill -TERM "$pid" 2>/dev/null' INT TERM
+
+# wait returns early when a trapped signal arrives, so it repeats until the run ends.
+while kill -0 "$pid" 2>/dev/null; do
+  wait "$pid"
+  code=$?
+done
+exit "$code"
