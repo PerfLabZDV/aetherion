@@ -1196,6 +1196,70 @@ defmodule AetherionTest do
   end
 
   describe "files (C119-C122, C173)" do
+    defp attempt(at, warmup),
+      do: %{
+        at: at,
+        phase: "Actions",
+        last: true,
+        warmup: warmup,
+        outcome: "ok",
+        latency: 1.0,
+        target: nil,
+        method: "GET",
+        path: "/"
+      }
+
+    test "a recorder keeps the attempts the requests file needs, and gives them in time order" do
+      alias Aetherion.Recorder
+
+      none = Recorder.new(requests: :none)
+      measured = Recorder.new(requests: :measured)
+      all = Recorder.new(requests: :all)
+
+      # Each the last attempt of its request, so the two outside warmup count.
+      for recorder <- [none, measured, all], {at, warmup} <- [{30.0, false}, {10.0, true}, {20.0, false}] do
+        Recorder.attempt(recorder, attempt(at, warmup), true)
+        Recorder.flush()
+      end
+
+      assert Recorder.take_requests(none, :infinity) == []
+      assert measured |> Recorder.take_requests(:infinity) |> Enum.map(& &1.at) == [20.0, 30.0]
+
+      # Before a watermark, and what is left stays for the next call.
+      assert all |> Recorder.take_requests(25.0) |> Enum.map(& &1.at) == [10.0, 20.0]
+      assert all |> Recorder.take_requests(:infinity) |> Enum.map(& &1.at) == [30.0]
+      assert Recorder.take_requests(all, :infinity) == []
+
+      # Metrics do not depend on the requests file.
+      assert Recorder.snapshot(none).totals.requests == 2
+    end
+
+    test "the requests file is written during the Test, not only at its end" do
+      server = server(fn _ -> {:sleep, 2, 200} end)
+      file = temp("streamed.jsonl")
+
+      # The window is requestTimeout + 2s, so attempts go out after about 2.2s.
+      source =
+        suite(server,
+          output: ~s|output { requests { file = "#{file}"; fields = [time]; } }|,
+          load: "requestTimeout 200ms; stages [ 2vu for 4s ]",
+          actions: ~S|sut.api.http.get("/");|
+        )
+
+      task = Task.async(fn -> run(source) end)
+      Process.sleep(3200)
+      assert Task.yield(task, 0) == nil
+      written = file |> File.read!() |> String.split("\n", trim: true) |> length()
+      assert written > 0
+
+      assert %{exit_code: 0} = Task.await(task, 10_000)
+      lines = file |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&JSON.decode!/1)
+      assert length(lines) > written
+      assert length(lines) == length(TestServer.requests(server))
+      times = Enum.map(lines, & &1["time"])
+      assert times == Enum.sort(times)
+    end
+
     test "the requests file holds every phase, in the fields of C120" do
       server = server(fn _ -> 200 end)
       file = temp("deep/requests.jsonl")

@@ -20,7 +20,7 @@ defmodule Aetherion do
   """
 
   alias PerfLang.AST
-  alias Aetherion.{Http, Interpreter, Load, Monitor, Recorder, Report, Signals, Stats, Values}
+  alias Aetherion.{Http, Interpreter, Load, Monitor, Recorder, Report, RequestsFile, Signals, Stats, Values}
 
   @phase_limit :timer.minutes(5)
 
@@ -224,17 +224,19 @@ defmodule Aetherion do
   # ---------- One Test ----------
 
   defp run_test(test, index, load, rt, out) do
-    recorder = Recorder.new()
+    recorder = Recorder.new(requests: keep(rt.output.requests))
     monitor = Monitor.start(rt, recorder)
     cells = :ets.new(:cells, [:ordered_set, :public])
     vars = :ets.new(:vars, [:set, :public])
+    load = load_config(load)
 
     context = %{
       name: test.name,
       index: index,
       recorder: recorder,
       monitor: monitor,
-      load: load_config(load),
+      writer: RequestsFile.start(out.requests, recorder, Load.grace(load) + load.think_ms, rt.run),
+      load: load,
       cells: cells,
       vars: vars,
       tracked: tracked(test),
@@ -270,6 +272,11 @@ defmodule Aetherion do
     # Verify did not decide, so the Test has no result of its own.
     {if(status == :ok, do: result, else: %{result | result: :aborted}), status}
   end
+
+  # The request attempts the requests file needs (C120, C122).
+  defp keep(nil), do: :none
+  defp keep(%{include_warmup: true}), do: :all
+  defp keep(_requests), do: :measured
 
   defp run_status(status) when status in [:ok, :stopped], do: :ok
   defp run_status(status), do: status
@@ -354,7 +361,7 @@ defmodule Aetherion do
       failures: Recorder.failures(recorder)
     }
 
-    Report.write_requests(out.requests, Recorder.records(recorder), ctx.rt.run)
+    RequestsFile.stop(ctx.test.writer)
     Report.write_samples(out.samples, Monitor.all_samples(monitor), ctx.rt.run)
     Recorder.delete(recorder)
     Monitor.delete(monitor)

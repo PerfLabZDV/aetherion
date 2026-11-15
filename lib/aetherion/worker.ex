@@ -6,8 +6,8 @@ defmodule Aetherion.Worker do
   the main server starts a session here. The session runs its share of the users,
   and its part of a stage with a count, with the same code as a run on one machine
   (`Aetherion.Load`). It records into a recorder of its own, on the main server's
-  window, and every 50ms sends the requests that count and how far its part of a
-  count stage is. When the main server stops it, the session stops its users,
+  window, and every 50ms sends the requests that count, its request attempts as
+  they become final, its samples, and how far its part of a count stage is. When the main server stops it, the session stops its users,
   waits for their last requests, sends the rest and ends. Every time it sends is
   on the main server's clock. A session whose main server goes away stops its
   users at once.
@@ -44,7 +44,7 @@ defmodule Aetherion.Worker do
   def start_session(controller, job), do: spawn(fn -> session(controller, job) end)
 
   defp session(controller, job) do
-    recorder = Recorder.new(outbox: true)
+    recorder = Recorder.new(outbox: true, requests: job.requests)
     Recorder.join_window(recorder, job.marks, job.offset_ms)
 
     # The lists of Setup, copied into a table here, so users can read them and add to them.
@@ -72,7 +72,6 @@ defmodule Aetherion.Worker do
       vars: vars,
       copied: MapSet.new(job.cells, &elem(&1, 0)),
       offset: job.offset_ms,
-      requests?: job.requests?,
       # The main server's number of the open count stage, and the last progress sent.
       stage: nil,
       sent: nil,
@@ -120,17 +119,27 @@ defmodule Aetherion.Worker do
     end
   end
 
-  # Sends only when there is something new: requests, samples, or progress in a count stage.
+  # Sends only when there is something new: requests, request attempts for the
+  # requests file, samples, or progress in a count stage.
   defp forward(state) do
-    rows = Recorder.take_counted(state.recorder)
+    {rows, records} = taken(state)
     progress = if state.stage, do: Map.put(Load.progress(state.users), :stage, state.stage)
 
-    if rows != [] or state.samples != [] or progress != state.sent do
-      report = Map.merge(progress || %{stage: nil}, %{rows: rows, samples: state.samples})
+    if rows != [] or records != [] or state.samples != [] or progress != state.sent do
+      report = Map.merge(progress || %{stage: nil}, %{rows: rows, records: records, samples: state.samples})
       send(state.controller, {:aetherion_progress, self(), report})
     end
 
     %{state | sent: progress, samples: []}
+  end
+
+  # The requests that count, and the final request attempts on the main server's clock.
+  defp taken(state) do
+    records =
+      for record <- Recorder.take_requests(state.recorder, :infinity),
+          do: %{record | at: record.at + state.offset}
+
+    {Recorder.take_counted(state.recorder), records}
   end
 
   # cpu and mem of this machine at the monitoring interval (C158, C183).
@@ -151,10 +160,13 @@ defmodule Aetherion.Worker do
     stop_sampler(state)
     state = drain_samples(state)
 
+    {rows, records} = taken(state)
+
     result = %{
-      counted: Recorder.take_counted(state.recorder),
+      rows: rows,
+      records: records,
       samples: state.samples,
-      recorder: Recorder.export(state.recorder, state.offset, state.requests?),
+      recorder: Recorder.export(state.recorder),
       vars: for({name, value, at} <- :ets.tab2list(state.vars), do: {name, value, at + state.offset}),
       cell_adds: for({key, _value} = row <- :ets.tab2list(state.cells), key not in state.copied, do: row)
     }

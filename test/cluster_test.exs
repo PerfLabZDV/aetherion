@@ -297,6 +297,30 @@ defmodule Aetherion.ClusterTest do
   end
 
   describe "one clock across workers" do
+    test "the workers send their request attempts during the run, and the main server writes them" do
+      server = server(fn _ -> {:sleep, 2, 200} end)
+      file = temp("streamed.jsonl")
+      {_peers, nodes} = workers(2)
+
+      source =
+        suite(server,
+          output: ~s|output { requests { file = "#{file}"; fields = [virtualUser]; } }|,
+          load: "requestTimeout 200ms; stages [ 4vu for 4s ]",
+          actions: ~S|sut.api.http.get("/");|
+        )
+
+      task = Task.async(fn -> run(source, workers: nodes) end)
+      Process.sleep(3200)
+      assert Task.yield(task, 0) == nil
+      assert file |> File.read!() |> String.split("\n", trim: true) |> length() > 0
+
+      assert %{exit_code: 0} = Task.await(task, 15_000)
+      assert settled?(server)
+      users = file |> lines() |> Enum.map(& &1["virtualUser"])
+      assert length(users) == length(TestServer.requests(server))
+      assert users |> Enum.uniq() |> Enum.sort() == [1, 2, 3, 4]
+    end
+
     test "the requests file is in time order across workers, and warmup ends at once on all of them" do
       server = server(fn _ -> {:sleep, 2, 200} end)
       file = temp("clock.jsonl")

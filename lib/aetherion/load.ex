@@ -22,7 +22,7 @@ defmodule Aetherion.Load do
   """
 
   alias PerfLang.AST
-  alias Aetherion.{Cluster, Http, Interpreter, Monitor, Recorder, Source, Values}
+  alias Aetherion.{Cluster, Http, Interpreter, Recorder, Source, Values}
 
   @tick 10
 
@@ -299,8 +299,7 @@ defmodule Aetherion.Load do
         {:halt, {:stopped, source}, state}
 
       {:aetherion_progress, pid, report} ->
-        Recorder.merge_counted(state.ctx.test.recorder, report.rows)
-        Monitor.store_samples(state.ctx.test.monitor, report.samples)
+        Cluster.take_report(state.ctx.test, report)
         {:cont, %{state | cluster: Cluster.progress(state.cluster, pid, report)}}
 
       {:DOWN, _ref, :process, pid, reason} ->

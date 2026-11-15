@@ -12,12 +12,13 @@ defmodule Aetherion.Cluster do
   and splits each user count across the workers, the first ones taking one more
   when it does not divide evenly. A stage with a count splits its iterations
   when it opens, in proportion to the users; it ends when every worker has
-  finished its part. A worker sends the requests that count and its progress
-  every 50ms, so stopIf and the metrics read here see every worker. When the
-  stages end, each worker stops its users, waits for their requests, and sends
-  the rest: its asserts, checks and failures, its request attempts for the
-  requests file, the Actions variables Verify and Cleanup read (C136), and what
-  its users added to the lists of Setup (C137).
+  finished its part. Every 50ms a worker sends the requests that count, its
+  request attempts for the requests file, its samples and its progress, so
+  stopIf and the metrics read here see every worker, and the requests file is
+  written here during the run (`Aetherion.RequestsFile`). When the stages end,
+  each worker stops its users, waits for their requests, and sends the rest:
+  its asserts, checks and failures, the Actions variables Verify and Cleanup
+  read (C136), and what its users added to the lists of Setup (C137).
 
   Not across workers: an `add` from Actions reaches Verify and Cleanup, but not
   the users of other workers during the run, and `loadGenerator` reads the main
@@ -191,10 +192,10 @@ defmodule Aetherion.Cluster do
     test = ctx.test
 
     job = %{
-      ctx: %{ctx | test: %{test | recorder: nil, monitor: nil, cells: nil, vars: nil}},
+      ctx: %{ctx | test: %{test | recorder: nil, monitor: nil, writer: nil, cells: nil, vars: nil}},
       cells: :ets.tab2list(test.cells),
       cells_table: test.cells,
-      requests?: ctx.rt.output.requests != nil,
+      requests: test.recorder.keep,
       marks: Recorder.window_marks(test.recorder),
       step: length(workers)
     }
@@ -345,8 +346,7 @@ defmodule Aetherion.Cluster do
   defp await(cluster, waiting, test, deadline) do
     receive do
       {:aetherion_progress, _pid, report} ->
-        Recorder.merge_counted(test.recorder, report.rows)
-        Monitor.store_samples(test.monitor, report.samples)
+        take_report(test, report)
         await(cluster, waiting, test, deadline)
 
       {:aetherion_done, pid, result} ->
@@ -368,9 +368,15 @@ defmodule Aetherion.Cluster do
   end
 
   # A worker's times are already on this node's clock.
+  @doc "Adds what a worker sent during the run: requests that count, request attempts and samples."
+  def take_report(test, report) do
+    Recorder.merge_counted(test.recorder, report.rows)
+    Recorder.add_requests(test.recorder, report.records)
+    Monitor.store_samples(test.monitor, report.samples)
+  end
+
   defp merge(test, result) do
-    Recorder.merge_counted(test.recorder, result.counted)
-    Monitor.store_samples(test.monitor, result.samples)
+    take_report(test, result)
     Recorder.merge(test.recorder, result.recorder)
 
     # The Actions variable of the iteration that set it last, on any worker (C136).

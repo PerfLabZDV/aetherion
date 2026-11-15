@@ -2,9 +2,11 @@ defmodule Aetherion.Recorder do
   @moduledoc """
   What a Test records, and the metrics read from it (C60, C104-C108, C118, C130).
 
-  Every request attempt goes into an ETS table. The last attempt of a request
-  waits in the process that made it until the next request or the end of the
-  iteration, so a failed assert or check can still mark it (C125, C130).
+  Every request attempt the requests file needs goes into an ETS table, in time
+  order, until `take_requests/2` takes it for the file (C120, C122). The last
+  attempt of a request waits in the process that made it until the next request
+  or the end of the iteration, so a failed assert or check can still mark it
+  (C125, C130).
 
   Metrics count Actions only, without warmup, and a retried request counts once,
   by its last attempt (C104, C107). Percentiles are exact (C172). A request that
@@ -40,11 +42,14 @@ defmodule Aetherion.Recorder do
   @counter_count 7
 
   @doc """
-  A new recorder. With `outbox: true`, as on a worker, a request that counts goes into an
-  outbox instead, which `take_counted/1` empties for the main server.
+  A new recorder. `requests` says which request attempts it keeps for the requests file:
+  `:all`, the default, `:measured` without warmup, or `:none` without a requests file
+  (C122). With `outbox: true`, as on a worker, a request that counts goes into an outbox
+  instead, which `take_counted/1` empties for the main server.
   """
   def new(opts \\ []) do
     %{
+      keep: Keyword.get(opts, :requests, :all),
       requests: :ets.new(:requests, [:ordered_set, :public, write_concurrency: true]),
       counted: :ets.new(:counted, [:duplicate_bag, :public, write_concurrency: true]),
       live: :counters.new(6, [:write_concurrency]),
@@ -135,9 +140,37 @@ defmodule Aetherion.Recorder do
   end
 
   defp insert(recorder, record) do
-    :ets.insert(recorder.requests, {{record.at, :erlang.unique_integer([:monotonic])}, record})
+    if keep?(recorder.keep, record), do: store_request(recorder, record)
     if counted?(record), do: count(recorder, record)
   end
+
+  defp keep?(:all, _record), do: true
+  defp keep?(:measured, record), do: not record.warmup
+  defp keep?(:none, _record), do: false
+
+  defp store_request(recorder, record),
+    do: :ets.insert(recorder.requests, {{record.at, :erlang.unique_integer([:monotonic])}, record})
+
+  @doc """
+  Takes the request attempts that started before `before` (milliseconds on this node's
+  clock, or `:infinity`), in time order. Each is taken on its own, so one a user stores
+  meanwhile stays for the next call.
+  """
+  def take_requests(%{requests: requests}, before) do
+    match = [{{{:"$1", :_}, :_}, if(before == :infinity, do: [], else: [{:<, :"$1", before}]), [:"$_"]}]
+
+    requests
+    |> :ets.select(match)
+    |> Enum.flat_map(fn {key, _record} ->
+      case :ets.take(requests, key) do
+        [{_key, record}] -> [record]
+        [] -> []
+      end
+    end)
+  end
+
+  @doc "Stores request attempts a worker sent, their `at` already on this node's clock."
+  def add_requests(recorder, records), do: Enum.each(records, &store_request(recorder, &1))
 
   defp counted?(%{phase: "Actions", last: true, warmup: false}), do: true
   defp counted?(_record), do: false
@@ -186,28 +219,18 @@ defmodule Aetherion.Recorder do
   def merge_counted(recorder, rows), do: Enum.each(rows, &count_row(recorder, &1))
 
   @doc """
-  What a worker's recorder holds besides the outbox, for the main server: the counters, the
-  failures, and with `requests?` every request attempt, its `at` moved onto the main
-  server's clock by `offset_ms`.
+  What a worker's recorder holds besides what it has sent during the run, for the main
+  server: the counters and the failures.
   """
-  def export(recorder, offset_ms, requests?) do
+  def export(recorder) do
     %{
-      requests:
-        if(requests?,
-          do:
-            for({_key, record} <- :ets.tab2list(recorder.requests), do: %{record | at: record.at + offset_ms}),
-          else: []
-        ),
       counters: for(index <- 1..@counter_count, do: :counters.get(recorder.counters, index)),
       failures: :ets.tab2list(recorder.failures)
     }
   end
 
-  @doc "Adds what `export/3` gave on a worker."
-  def merge(recorder, %{requests: requests, counters: counters, failures: failures}) do
-    for record <- requests,
-        do: :ets.insert(recorder.requests, {{record.at, :erlang.unique_integer([:monotonic])}, record})
-
+  @doc "Adds what `export/1` gave on a worker."
+  def merge(recorder, %{counters: counters, failures: failures}) do
     for {value, index} <- Enum.with_index(counters, 1),
         value != 0,
         do: :counters.add(recorder.counters, index, value)
@@ -295,11 +318,6 @@ defmodule Aetherion.Recorder do
   end
 
   # ---------- Metrics ----------
-
-  @doc "All request attempts in time order, for the requests file (C120)."
-  def records(recorder) do
-    for {_key, record} <- :ets.tab2list(recorder.requests), do: record
-  end
 
   @doc "Everything the request metrics read: the totals, each endpoint (C135) and each target (C176)."
   def snapshot(recorder) do

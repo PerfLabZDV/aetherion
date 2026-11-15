@@ -119,9 +119,10 @@ Verify {
 ```
 
 With `stages [ 2000vu for 5m ]` and three workers, each runs 667 users, the first one more. Users are numbered
-across the workers, so `virtualUser` in the requests file stays unique. The workers send the requests that count every
-50ms, so stopIf and the console report see all of them, and percentiles stay exact (C172). When the stages end,
-each worker stops its users, waits for their last requests and sends what it recorded; Verify starts after that.
+across the workers, so `virtualUser` in the requests file stays unique. The workers send the requests that count, and
+their request attempts for the requests file, every 50ms, so stopIf and the console report see all of them, percentiles
+stay exact (C172), and the main server writes the file during the run. When the stages end, each worker stops its users,
+waits for their last requests and sends the rest; Verify starts after that.
 
 A stage with a count splits its iterations once, when it opens, in proportion to the users: `5vu for 41iter` on two
 workers is 3 users with 25 iterations and 2 users with 16 (C103). The stage ends when every worker has finished its
@@ -131,7 +132,8 @@ still have iterations to finish.
 
 Each worker measures on the main server's clock: when a Test starts, the main server measures how far each worker's
 clock is from its own, so warmup ends at the same moment everywhere, the requests file is in time order across
-workers, and Verify reads an Actions variable from the iteration that set it last, on any worker (C136).
+workers to within about a millisecond, and Verify reads an Actions variable from the iteration that set it last, on any
+worker (C136).
 
 The nodes talk over Erlang distribution: port 4369 (epmd) and one port per node, which can be fixed for a firewall
 with `ELIXIR_ERL_OPTIONS="-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100"`. The cookie is the only check
@@ -430,6 +432,20 @@ C130).
 A Test without criteria (no Verify, or a Verify that evaluates no assert) fails if any assert failed in Actions, so it
 cannot pass by accident. Once Verify has a criterion, only Verify decides: a Test that adds
 `assert latency.p95() < 300ms;` also needs `assert asserts.failed() == 0;` to keep failing on a failed assert.
+
+## Requests file
+
+The requests file (C120) is written during each Test, so a long run holds only a short window of request attempts in
+memory, on one machine and with workers. Without a requests file no attempt is kept, and without `includeWarmup` no
+warmup attempt (C122). Every 250ms the attempts that started more than a window ago are appended, in time order; the
+rest when the Test ends. The window is the longest a request can take, `requestTimeout` times the attempts of `retry`
+plus their delays, plus 2s, plus `thinkTime`: the last attempt of a request is final only at the user's next request or
+the end of its iteration, since an assert can still mark it (C125). An attempt that becomes final later than that, after
+a `sleep` in Actions, is written when it arrives, a little out of order. With the default `requestTimeout 30s` the
+window is 32s, so memory holds about 32s of attempts; a shorter `requestTimeout` makes it smaller.
+
+The metrics keep one compact row for every request that counts, for exact percentiles (C172), so a long run still grows
+by those rows.
 
 ## Summary file
 
