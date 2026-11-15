@@ -37,6 +37,7 @@ lib/mix/tasks/aetherion.ex     mix aetherion run
 bin/aetherion                  the same command, and a clean stop on Ctrl+C
 rel/vm.args.eex                flags of the Erlang VM of the release
 packaging/debian/              the Debian 13 package: build.sh, and the files it installs
+packaging/ansible/             deploy.yml, which installs the package on main servers and workers
 test/                          509 tests; fixtures/full_suite.perf holds every example from the EBNF,
                                server_helper.exs a local HTTP server and MQTT broker for the engine tests, and
                                cluster_test.exs runs suites on worker nodes on this machine
@@ -176,6 +177,15 @@ sudo systemctl enable --now aetherion-worker
 A worker accepts the main server on ports 4369 and 4370; the main server needs no open port. Installing the package
 again restarts a running worker, and every server must run the same version. The package's guide,
 `/usr/share/doc/aetherion/README.Debian` (`packaging/debian/files/README.Debian`), has the details.
+
+For many servers, `packaging/ansible/deploy.yml` installs the package on the main servers and workers of an inventory,
+writes each worker's `worker.env` with a cookie from a vault, starts the workers and checks that the main servers reach
+them (`packaging/ansible/README.md`):
+
+```sh
+cd packaging/ansible
+ansible-playbook deploy.yml --ask-vault-pass
+```
 
 ## Usage
 

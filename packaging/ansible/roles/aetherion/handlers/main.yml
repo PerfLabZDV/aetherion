@@ -1,0 +1,5 @@
+# try-restart: only a running worker, so --skip-tags service does not start one.
+- name: Restart the worker
+  ansible.builtin.command:
+    argv: [systemctl, try-restart, aetherion-worker]
+  changed_when: true

@@ -1,0 +1,23 @@
+# The package of packaging/debian/build.sh, of the version in mix.exs.
+aetherion_version: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../../mix.exs') | regex_search('version: \"([^\"]+)\"', '\\1') | first }}"
+aetherion_deb: "{{ playbook_dir }}/../debian/dist/aetherion_{{ aetherion_version }}-1_amd64.deb"
+
+# The cookie, a long random secret, the same on the main servers and every worker. No default:
+# set it in a vault, see README.md.
+# aetherion_cookie:
+
+# A worker's node name is aetherion_worker_name@aetherion_worker_host (C181): the name the
+# suites use, as in loadGenerator.euWorker1.cpu, and the address the main servers reach it at.
+# The inventory name is the default, so name the workers' hosts like euWorker1, or set this.
+aetherion_worker_name: "{{ inventory_hostname }}"
+aetherion_worker_host: "{{ ansible_host | default(inventory_hostname) }}"
+
+# The worker's distribution port. epmd stays on 4369.
+aetherion_dist_port: 4370
+
+# true: ufw rules on the workers that let the main servers in on 4369 and the distribution port.
+aetherion_ufw: false
+
+# Users on the main servers who run suites: they join the group aetherion, which can read
+# /etc/aetherion/main.env with the cookie.
+aetherion_main_users: []

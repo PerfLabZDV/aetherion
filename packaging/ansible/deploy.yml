@@ -1,0 +1,10 @@
+# Installs the Debian 13 package on the main servers and the workers of the inventory, and
+# starts the workers. See README.md.
+#
+#   ansible-playbook deploy.yml --ask-vault-pass
+
+- name: Deploy Aetherion
+  hosts: aetherion_main:aetherion_workers
+  become: true
+  roles:
+    - aetherion

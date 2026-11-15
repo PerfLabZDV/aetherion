@@ -1,0 +1,179 @@
+- name: Check the server and the settings
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == "Debian"
+      - ansible_facts.distribution_major_version == "13"
+      - ansible_facts.architecture == "x86_64"
+      - aetherion_cookie is defined
+      - aetherion_cookie | length >= 32
+    fail_msg: >-
+      The package is for Debian 13 on amd64, and aetherion_cookie must be set, 32 characters
+      or more, such as the output of openssl rand -hex 32 (README.md).
+    quiet: true
+
+- name: Check the worker's node name
+  ansible.builtin.assert:
+    that:
+      - aetherion_worker_name is match('^[A-Za-z][A-Za-z0-9_]*$')
+      - aetherion_worker_name not in ['cpu', 'mem', 'disk', 'gpu', 'power']
+      - aetherion_worker_host is match('^[^@\s"]+$')
+    fail_msg: >-
+      {{ aetherion_worker_name }}@{{ aetherion_worker_host }} is not a worker's node name: the name
+      needs letters, digits and _, starting with a letter, and cannot be cpu, mem, disk, gpu or
+      power (C181, C183). Set aetherion_worker_name for this host.
+    quiet: true
+  when: inventory_hostname in groups['aetherion_workers'] | default([])
+
+- name: Check that the package is built
+  ansible.builtin.stat:
+    path: "{{ aetherion_deb }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: aetherion_deb_stat
+
+- name: Fail without the package
+  ansible.builtin.assert:
+    that: aetherion_deb_stat.stat.exists
+    fail_msg: "{{ aetherion_deb }} is missing: run packaging/debian/build.sh first."
+    quiet: true
+  run_once: true
+
+- name: Create the directory of the package
+  ansible.builtin.file:
+    path: /var/cache/aetherion-deploy
+    state: directory
+    mode: "0755"
+
+- name: Copy the package
+  ansible.builtin.copy:
+    src: "{{ aetherion_deb }}"
+    dest: "/var/cache/aetherion-deploy/{{ aetherion_deb | basename }}"
+    mode: "0644"
+  register: aetherion_copy
+
+# dpkg-query, as package_facts needs python3-apt, which a minimal Debian lacks.
+- name: Read the installed version
+  ansible.builtin.command:
+    argv:
+      - dpkg-query
+      - --show
+      - "--showformat=${db:Status-Status} ${Version}"
+      - aetherion
+  register: aetherion_installed
+  changed_when: false
+  failed_when: false
+
+# Not the apt module's deb option: it skips a package of the installed version, and a rebuild
+# of the same version holds other code, which the main server refuses (C184). So the package
+# goes in again whenever its file changed. postinst restarts a running worker.
+- name: Install the package
+  ansible.builtin.command:
+    argv:
+      - apt-get
+      - install
+      - --yes
+      - --reinstall
+      - -o
+      - Dpkg::Options::=--force-confold
+      - "/var/cache/aetherion-deploy/{{ aetherion_deb | basename }}"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when: aetherion_copy is changed or aetherion_installed.stdout != 'installed ' ~ aetherion_version ~ '-1'
+  changed_when: true
+
+# The workers.
+
+- name: Write the worker's configuration
+  ansible.builtin.template:
+    src: worker.env.j2
+    dest: /etc/aetherion/worker.env
+    owner: root
+    group: aetherion
+    mode: "0640"
+  diff: false
+  notify: Restart the worker
+  when: inventory_hostname in groups['aetherion_workers'] | default([])
+
+- name: Let the main servers in
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ item[0] }}"
+    to_port: "{{ item[1] }}"
+    proto: tcp
+    comment: aetherion
+  loop: "{{ aetherion_main_hosts | product(['4369', aetherion_dist_port | string]) | list }}"
+  vars:
+    aetherion_main_hosts: >-
+      {%- set hosts = [] -%}
+      {%- for host in groups['aetherion_main'] | default([]) -%}
+      {%- set _ = hosts.append(hostvars[host].ansible_host | default(host)) -%}
+      {%- endfor -%}
+      {{ hosts }}
+  when:
+    - inventory_hostname in groups['aetherion_workers'] | default([])
+    - aetherion_ufw | bool
+
+- name: Start the worker, and at boot
+  ansible.builtin.systemd_service:
+    name: aetherion-worker
+    enabled: true
+    state: started
+  when: inventory_hostname in groups['aetherion_workers'] | default([])
+  tags: service
+
+- name: Restart workers with a new configuration
+  ansible.builtin.meta: flush_handlers
+  tags: service
+
+- name: Wait for the worker
+  ansible.builtin.wait_for:
+    port: "{{ aetherion_dist_port }}"
+    timeout: 60
+  when: inventory_hostname in groups['aetherion_workers'] | default([])
+  tags: service
+
+# The main servers.
+
+# From the inventory, not from the workers' facts, so that --limit to the main servers works.
+# The defaults are those of defaults/main.yml.
+- name: List the workers
+  ansible.builtin.set_fact:
+    aetherion_workers: >-
+      {%- set nodes = [] -%}
+      {%- for host in groups['aetherion_workers'] | default([]) -%}
+      {%- set hv = hostvars[host] -%}
+      {%- set _ = nodes.append((hv.aetherion_worker_name | default(host)) ~ '@'
+                ~ (hv.aetherion_worker_host | default(hv.ansible_host | default(host)))) -%}
+      {%- endfor -%}
+      {{ nodes }}
+  when: inventory_hostname in groups['aetherion_main'] | default([])
+
+- name: Write the main server's configuration
+  ansible.builtin.template:
+    src: main.env.j2
+    dest: /etc/aetherion/main.env
+    owner: root
+    group: aetherion
+    mode: "0640"
+  diff: false
+  when: inventory_hostname in groups['aetherion_main'] | default([])
+
+- name: Let the users run suites
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: aetherion
+    append: true
+  loop: "{{ aetherion_main_users }}"
+  when: inventory_hostname in groups['aetherion_main'] | default([])
+
+- name: Check that the main server reaches every worker
+  ansible.builtin.wait_for:
+    host: "{{ item[0].split('@')[1] }}"
+    port: "{{ item[1] }}"
+    timeout: 10
+  loop: "{{ aetherion_workers | default([]) | product(['4369', aetherion_dist_port | string]) | list }}"
+  loop_control:
+    label: "{{ item[0] }} port {{ item[1] }}"
+  when: inventory_hostname in groups['aetherion_main'] | default([])
+  tags: service
