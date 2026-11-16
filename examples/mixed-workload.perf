@@ -80,6 +80,14 @@ TestSuite MixedWorkload {
       }
     }
 
+    // The whole suite runs 10 times, with a 4m pause between two runs in
+    // which nothing is sampled. The summary has statistics across the runs
+    // (C178).
+    runs {
+      count    = 10;
+      cooldown = 4m;
+    }
+
     output {
       // One JSON line per request (C120, C122). The three endpoints get
       // their own metrics in the summary without any setting (C135).
@@ -193,12 +201,10 @@ TestSuite MixedWorkload {
     Load {
       thinkTime 1s;
       requestTimeout 5s;            // a timeout counts as a failure (C96, C105)
-      warmup 30s;                   // the ramp is not measured (C167)
 
-      stages [
-        50vu in  30s,               // linear ramp from 0 to 50 users (C128)
-        50vu for 5m                 // hold 50 users
-      ]
+      // No ramp: a hold starts all 1000 users together and keeps them
+      // for 10m (C128).
+      stages [ 1000vu for 10m ]
     }
 
     // One iteration is one request (C103). The coin is an Int from 0 to 99,
