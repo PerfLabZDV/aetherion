@@ -1967,6 +1967,34 @@ defmodule AetherionTest do
       assert output =~ "passed assert errors.rate() < 2%  (errors.rate() = 0.0%)"
       assert output =~ "Seed 5, passed"
     end
+
+    test "the console shows when the suite and each Test start and end, as they do" do
+      server = server(fn _ -> 200 end)
+      source = suite(server, actions: ~S|sut.api.http.get("/a");|, verify: "assert errors.rate() < 2%;")
+      output = ExUnit.CaptureIO.capture_io(fn -> assert run(source, report: true, seed: 5).exit_code == 0 end)
+
+      time = ~S"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ"
+      assert output =~ ~r/^#{time}  Suite S started \(seed 5\)$/m
+      assert output =~ ~r/^#{time}  Test T started$/m
+      assert output =~ ~r/^#{time}  Test T ended after \d+(ms|s): passed$/m
+      assert output =~ ~r/^Started #{time}, ended #{time}, after \d+(ms|s)$/m
+
+      # In the order they happen, before the report.
+      [started, ended, report] =
+        for text <- ["Test T started", "Test T ended", "Test T: PASSED"], do: :binary.match(output, text)
+
+      assert started < ended and ended < report
+
+      # A run without a report prints nothing.
+      assert ExUnit.CaptureIO.capture_io(fn -> run(source) end) == ""
+    end
+
+    test "durations on the console" do
+      assert Aetherion.Report.duration(850) == "850ms"
+      assert Aetherion.Report.duration(12_400) == "12s"
+      assert Aetherion.Report.duration(331_000) == "5m31s"
+      assert Aetherion.Report.duration(3_723_000) == "1h2m3s"
+    end
   end
 
   describe "runs (C178-C180)" do
@@ -2157,6 +2185,8 @@ defmodule AetherionTest do
       assert output =~ ~r/latency p95 \d+\.\d\dms ± \d+\.\d\dms \(n=3, CV/
       assert output =~ ~r"GET api/a p95"
       assert output =~ "Seed 5, 3 of 3 runs, passed"
+      assert output =~ ~r/Z  Run 2 of 3 started \(seed #{Aetherion.run_seed(5, 2)}\)\n/
+      assert output =~ ~r/Z  Run 3 of 3 ended after \d+(ms|s): passed\n/
     end
   end
 

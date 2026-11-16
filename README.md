@@ -55,7 +55,7 @@ bin/aetherion                  the same command, and a clean stop on Ctrl+C
 rel/vm.args.eex                flags of the Erlang VM of the release
 packaging/debian/              the Debian 13 package: build.sh, and the files it installs
 packaging/ansible/             deploy.yml, which installs the package on main servers, workers and agents
-test/                          531 tests; fixtures/full_suite.perf holds every example from the EBNF,
+test/                          533 tests; fixtures/full_suite.perf holds every example from the EBNF,
                                server_helper.exs a local HTTP server and MQTT broker for the engine tests, and
                                cluster_test.exs runs suites on worker and agent nodes on this machine
 examples/                      example suites, e.g. t1-basic-http-get-req.perf, and staging.perfcfg, an external
@@ -88,6 +88,21 @@ bin/aetherion run ../tests/shop.perf --config staging.perfcfg --runs 10
 
 The process exits with 0 when every Test passed, 1 when a Test failed and 2 when the run could not start or finish
 (C132). `--config`, `--seed` and `--runs` are optional (C165, C178).
+
+While it runs, the console shows when the suite and each Test start and end, and with several runs each run, in UTC
+like the requests and samples files. The report follows at the end, closed by the start and end of the whole run:
+
+```
+2026-11-16T10:00:00Z  Suite MixedWorkload started (seed 42)
+2026-11-16T10:00:00Z  Test MixedWorkload started
+2026-11-16T10:05:31Z  Test MixedWorkload ended after 5m31s: passed
+
+Test MixedWorkload: PASSED
+  ...
+
+Seed 42, passed
+Started 2026-11-16T10:00:00Z, ended 2026-11-16T10:05:31Z, after 5m31s
+```
 
 `bin/aetherion` is the same command, from any directory, with paths relative to that directory. Use it to stop a run by
 hand: on Ctrl+C or SIGTERM the users finish their requests, Verify is skipped, Cleanup runs, and the run exits with 2
@@ -507,6 +522,7 @@ Test MixedWorkload: PASSED, passed in 3 of 3 counted runs
   ...
 
 Seed 42, 4 of 4 runs (1 discarded), passed
+Started 2026-10-31T10:00:00Z, ended 2026-10-31T10:22:00Z, after 22m0s
 ```
 
 Criteria on the statistics, such as a limit on the coefficient of variation, are not part of the language yet: Verify

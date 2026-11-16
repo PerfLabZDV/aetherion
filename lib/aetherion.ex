@@ -41,6 +41,7 @@ defmodule Aetherion do
     started = Recorder.now()
     if Keyword.get(opts, :signals, true), do: Signals.install(self())
     rt = runtime(ast, seed, opts)
+    Report.progress(rt.report, "Suite #{ast.name} started (seed #{seed})")
 
     {runs, status, message} =
       try do
@@ -64,7 +65,8 @@ defmodule Aetherion do
       message: message
     }
 
-    if Keyword.get(opts, :report, true), do: Report.console(run)
+    # The report follows at once, with the end of the run.
+    if rt.report, do: Report.console(run)
     write_summary(rt, run)
     Map.put(run, :exit_code, exit_code(run))
   end
@@ -171,6 +173,8 @@ defmodule Aetherion do
     rt = %{rt | seed: seed, run: index}
     started_at = DateTime.utc_now()
     started = Recorder.now()
+    # With one run, the lines of the suite say it all.
+    if plan.count > 1, do: Report.progress(rt.report, "Run #{index} of #{plan.count} started (seed #{seed})")
 
     {tests, status, message} =
       try do
@@ -180,7 +184,7 @@ defmodule Aetherion do
         error in [Monitor.Error, File.Error] -> {[], :failed, Exception.message(error)}
       end
 
-    %{
+    run = %{
       run: index,
       seed: seed,
       discarded: index <= plan.discard,
@@ -190,6 +194,15 @@ defmodule Aetherion do
       status: status,
       message: message
     }
+
+    if plan.count > 1,
+      do:
+        Report.progress(
+          rt.report,
+          "Run #{index} of #{plan.count} ended after #{Report.duration(run.duration_ms)}: #{Report.result(run)}"
+        )
+
+    run
   end
 
   # Nothing is sampled during the cooldown; an interrupt ends it at once.
@@ -249,6 +262,8 @@ defmodule Aetherion do
   defp run_test(test, index, load, rt, out) do
     recorder = Recorder.new(requests: keep(rt.output.requests))
     monitor = Monitor.start(rt, recorder)
+    started = Recorder.now()
+    Report.progress(rt.report, "Test #{test.name} started")
     cells = :ets.new(:cells, [:ordered_set, :public])
     vars = :ets.new(:vars, [:set, :public])
     load = load_config(load)
@@ -293,7 +308,14 @@ defmodule Aetherion do
     result = finish_test(test, ctx, stopped_by, out)
 
     # Verify did not decide, so the Test has no result of its own.
-    {if(status == :ok, do: result, else: %{result | result: :aborted}), status}
+    result = if(status == :ok, do: result, else: %{result | result: :aborted})
+
+    Report.progress(
+      rt.report,
+      "Test #{test.name} ended after #{Report.duration(Recorder.now() - started)}: #{result.result}"
+    )
+
+    {result, status}
   end
 
   # The request attempts the requests file needs (C120, C122).
@@ -481,6 +503,7 @@ defmodule Aetherion do
       run: 1,
       workers: opts[:workers] || [],
       phase_limit: opts[:phase_limit_ms] || @phase_limit,
+      report: Keyword.get(opts, :report, true),
       fns: Map.new(ast.functions || [], &{&1.name, &1}),
       targets: for(%AST.Sut{targets: targets} <- sections, target <- targets, into: %{}, do: target(target)),
       monitoring: monitoring(sections),

@@ -203,11 +203,47 @@ defmodule Aetherion.Report do
 
   # One run prints as it always has; several runs print a line per Test and
   # run, then each Test across the counted runs (C180).
+  @doc """
+  A line on the console the moment something starts or ends, after its time: UTC to the
+  second, as in the requests and samples files. Nothing when `report` is false.
+  """
+  def progress(report, text, device \\ :stdio)
+  def progress(false, _text, _device), do: :ok
+  def progress(_report, text, device), do: IO.puts(device, "#{clock(DateTime.utc_now())}  #{text}")
+
+  @doc "A time on the console: ISO 8601 in UTC, to the second."
+  def clock(%DateTime{} = time), do: time |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+  @doc "A duration on the console: 850ms, 12s, 5m31s, 1h2m3s."
+  def duration(ms) when ms < 1000, do: "#{round(ms)}ms"
+
+  def duration(ms) do
+    seconds = round(ms / 1000)
+    {h, m, s} = {div(seconds, 3600), div(rem(seconds, 3600), 60), rem(seconds, 60)}
+
+    cond do
+      h > 0 -> "#{h}h#{m}m#{s}s"
+      m > 0 -> "#{m}m#{s}s"
+      true -> "#{s}s"
+    end
+  end
+
+  # When the whole run started and ended.
+  defp times(run, device) do
+    ended = DateTime.add(run.started_at, run.duration_ms, :millisecond)
+
+    IO.puts(
+      device,
+      "Started #{clock(run.started_at)}, ended #{clock(ended)}, after #{duration(run.duration_ms)}"
+    )
+  end
+
   def console(run, device \\ :stdio)
 
   def console(%{plan: %{count: 1}} = run, device) do
     for single <- run.runs, do: Enum.each(single.tests, &console_test(&1, device))
     IO.puts(device, "\nSeed #{run.seed}, #{result(run)}")
+    times(run, device)
     if run.message, do: IO.puts(device, run.message)
   end
 
@@ -221,6 +257,7 @@ defmodule Aetherion.Report do
       "\nSeed #{run.seed}, #{length(run.runs)} of #{run.plan.count} runs#{discarded}, #{result(run)}"
     )
 
+    times(run, device)
     if run.message, do: IO.puts(device, run.message)
   end
 
