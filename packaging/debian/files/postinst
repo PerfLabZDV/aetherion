@@ -5,18 +5,23 @@ if [ "$1" = configure ]; then
   getent group aetherion >/dev/null || groupadd --system aetherion
   getent passwd aetherion >/dev/null ||
     useradd --system --gid aetherion --home-dir /var/lib/aetherion --no-create-home \
-      --shell /usr/sbin/nologin --comment "Aetherion worker" aetherion
+      --shell /usr/sbin/nologin --comment "Aetherion worker and agent" aetherion
 
-  # The cookie is a secret: readable by the worker, not by everyone.
-  chown root:aetherion /etc/aetherion/worker.env
-  chmod 0640 /etc/aetherion/worker.env
+  # The cookie is a secret: readable by the worker and the agent, not by everyone.
+  for file in /etc/aetherion/worker.env /etc/aetherion/agent.env; do
+    chown root:aetherion "$file"
+    chmod 0640 "$file"
+  done
 
   if [ -d /run/systemd/system ]; then
     systemctl daemon-reload >/dev/null || true
-    # A worker runs the same code as its main server (C184), so an upgrade restarts it.
-    if systemctl is-active --quiet aetherion-worker; then
-      systemctl restart aetherion-worker || true
-    fi
+    # A worker or an agent runs the same code as its main server (C184, C185), so an
+    # upgrade restarts it.
+    for service in aetherion-worker aetherion-agent; do
+      if systemctl is-active --quiet "$service"; then
+        systemctl restart "$service" || true
+      fi
+    done
   fi
 fi
 

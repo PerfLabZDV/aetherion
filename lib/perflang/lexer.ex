@@ -11,7 +11,7 @@ defmodule PerfLang.Lexer do
 
     * identifiers and keywords: the name as a string
     * `time_lit`: `{raw, [{number_text, unit}]}`, e.g. `{"7m30s", [{"7", :m}, {"30", :s}]}`
-    * `energy_lit`, `power_lit`, `carbon_lit`: `{raw, number_text, unit}`
+    * `energy_lit`, `power_lit`, `carbon_lit`, `data_rate_lit`: `{raw, number_text, unit}`
     * `users_lit`, `iterations_lit`, `percentage_lit`: `{raw, number_text}`
     * `int_lit`, `float_lit`: the number text
     * `string_lit`, `raw_string_lit`: the string content, escapes resolved
@@ -71,7 +71,7 @@ defmodule PerfLang.Lexer do
     {raw, for([num, unit] <- parts, do: {num, String.to_atom(unit)})}
   end
 
-  defp value(category, chars) when category in [:energy_lit, :power_lit, :carbon_lit] do
+  defp value(category, chars) when category in [:energy_lit, :power_lit, :carbon_lit, :data_rate_lit] do
     raw = List.to_string(chars)
     [_, num, unit] = Regex.run(~r/^(\d+(?:\.\d+)?)(.+)$/, raw)
     {raw, num, String.to_existing_atom(unit)}
@@ -114,9 +114,10 @@ defmodule PerfLang.Lexer do
   defp unescape([?\\, c | rest], acc), do: unescape(rest, [c | acc])
   defp unescape([c | rest], acc), do: unescape(rest, [c | acc])
 
-  # Units the energy/power/carbon atoms are created from; String.to_existing_atom/1
-  # above relies on them existing.
-  @units [:mJ, :J, :kJ, :MJ, :Wh, :kWh, :MWh, :mW, :W, :kW, :mgCO2e, :gCO2e, :kgCO2e]
+  # Units the energy/power/carbon/data rate atoms are created from;
+  # String.to_existing_atom/1 above relies on them existing.
+  @units [:mJ, :J, :kJ, :MJ, :Wh, :kWh, :MWh, :mW, :W, :kW, :mgCO2e, :gCO2e, :kgCO2e] ++
+           [:"B/s", :"kB/s", :"MB/s", :"GB/s"]
   @doc false
   def units, do: @units
 
@@ -160,6 +161,7 @@ defmodule PerfLang.Lexer do
 
     "invalid literal #{text}: #{inspect(suffix)} is not a unit after #{num} " <>
       "(Time: h m s ms, combined largest first like 7m30s; Energy: mJ J kJ MJ Wh kWh MWh; " <>
-      "Power: mW W kW; Carbon: mgCO2e gCO2e kgCO2e; VirtualUsers: vu; iteration count: iter, or iter/vu per user)"
+      "Power: mW W kW; Carbon: mgCO2e gCO2e kgCO2e; DataRate: B/s kB/s MB/s GB/s; VirtualUsers: vu; " <>
+      "iteration count: iter, or iter/vu per user)"
   end
 end

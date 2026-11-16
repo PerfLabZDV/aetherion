@@ -8,17 +8,21 @@ defmodule Aetherion.CLI do
   The virtual users run on the workers of the Config, `workers { w1 { host =
   "10.0.0.11"; } }` (C181), each started with `aetherion worker --name
   w1@10.0.0.11`, which waits for runs. `--workers w1@10.0.0.11,w2@10.0.0.12`
-  replaces that section (C184). Main server and workers share a cookie, from
+  replaces that section (C184). With `format = aetherion` in monitoring, each
+  measured target is read by its monitoring agent, `aetherion agent --name
+  sutServer1@192.168.178.91` (C185), connected before any Test starts like the
+  workers. Main server, workers and agents share a cookie, from
   `$AETHERION_COOKIE` or `--cookie`, and `--name` names the main server's node
   (`Aetherion.Cluster`).
   """
 
-  alias Aetherion.{Cluster, Worker}
+  alias Aetherion.{Agent, Cluster, Worker}
 
   @usage """
   usage: aetherion run file.perf [--config file.perfcfg] [--seed n] [--runs n]
                                  [--workers name@host,...] [--cookie c] [--name name@host]
-         aetherion worker --name name@host [--cookie c]\
+         aetherion worker --name name@host [--cookie c]
+         aetherion agent --name name@host [--cookie c]\
   """
 
   @run_options [
@@ -40,19 +44,24 @@ defmodule Aetherion.CLI do
     end
   end
 
-  def main(["worker" | args]) do
+  def main(["worker" | args]), do: serve(args, &Worker.serve/2)
+
+  # The monitoring agent of a machine under test (C185).
+  def main(["agent" | args]), do: serve(args, &Agent.serve/2)
+
+  def main(_args), do: usage()
+
+  defp serve(args, serve) do
     with {options, [], []} <- OptionParser.parse(args, strict: [name: :string, cookie: :string]),
          name when is_binary(name) <- options[:name] do
       case Cluster.cookie(options[:cookie]) do
-        {:ok, cookie} -> report(Worker.serve(name, cookie))
+        {:ok, cookie} -> report(serve.(name, cookie))
         error -> report(error)
       end
     else
       _ -> usage()
     end
   end
-
-  def main(_args), do: usage()
 
   defp usage do
     IO.puts(:stderr, @usage)
@@ -133,17 +142,19 @@ defmodule Aetherion.CLI do
        }),
        do: %{config | sections: Enum.reject(sections, &match?(%PerfLang.AST.Workers{}, &1)) ++ [workers]}
 
-  # The workers of the merged Config (C181), connected before any Test starts (C184).
+  # The workers (C181) and the aetherion agents (C185) of the merged Config,
+  # connected before any Test starts (C184).
   defp workers(ast, options) do
-    case Aetherion.workers(ast) do
-      [] ->
+    case {Aetherion.workers(ast), Aetherion.agents(ast)} do
+      {[], []} ->
         if options[:cookie] || options[:name],
           do:
-            {:error, :workers, "--cookie and --name are for runs on workers; the suite has no workers (C181)"},
+            {:error, :workers,
+             "--cookie and --name are for runs on workers or with aetherion agents; the suite has neither (C181, C185)"},
           else: {:ok, []}
 
-      nodes ->
-        case Cluster.connect(nodes, name: options[:name], cookie: options[:cookie]) do
+      {nodes, agents} ->
+        case Cluster.connect(nodes, agents: agents, name: options[:name], cookie: options[:cookie]) do
           {:ok, nodes} -> {:ok, nodes}
           {:error, message} -> {:error, :workers, message}
         end

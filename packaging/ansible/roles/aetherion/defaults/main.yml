@@ -15,7 +15,17 @@ aetherion_worker_host: "{{ ansible_host | default(inventory_hostname) }}"
 # The worker's distribution port. epmd stays on 4369.
 aetherion_dist_port: 4370
 
-# true: ufw rules on the workers that let the main servers in on 4369 and the distribution port.
+# A monitoring agent's node name is aetherion_agent_name@aetherion_agent_host (C185): the name
+# of its target in the suites, as in sut.sutServer1.cpu, and the address the main servers reach
+# it at. The inventory name is the default, as for workers.
+aetherion_agent_name: "{{ inventory_hostname }}"
+aetherion_agent_host: "{{ ansible_host | default(inventory_hostname) }}"
+
+# The agent's distribution port: not the worker's, so a machine can run both.
+aetherion_agent_dist_port: 4371
+
+# true: ufw rules on the workers and agents that let the main servers in on 4369 and the
+# distribution port.
 aetherion_ufw: false
 
 # Users on the main servers who run suites: they join the group aetherion, which can read

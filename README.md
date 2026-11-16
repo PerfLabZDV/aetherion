@@ -1,7 +1,7 @@
 # Aetherion
 
 Aetherion runs performance tests written in PerfLang. This project holds the language, built from `perflang.ebnf`
-(version 1.36, decisions C1 to C184) with Erlang's built-in generators **leex** for the lexer and **yecc** (LALR(1))
+(version 1.37, decisions C1 to C186) with Erlang's built-in generators **leex** for the lexer and **yecc** (LALR(1))
 for the parser, and its execution engine, which uses Mint for HTTP and emqtt for MQTT. The language lives in the
 `PerfLang` modules and the engine in the `Aetherion` modules.
 
@@ -21,7 +21,7 @@ file is readable by root and the group `aetherion`; a user added to the group mu
 ## Layout
 
 ```
-perflang.ebnf                  the grammar and decisions C1 to C184
+perflang.ebnf                  the grammar and decisions C1 to C186
 src/perflang_lexer.xrl         token rules (leex)
 src/perflang_parser.yrl        grammar, one nonterminal per EBNF rule (yecc)
 lib/perflang.ex                public API of the language
@@ -36,6 +36,8 @@ lib/aetherion/interpreter.ex   runs the statements of a phase over the typed AST
 lib/aetherion/load.ex          virtual users, stages and iterations
 lib/aetherion/http.ex          HTTP requests (Mint), one connection per user
 lib/aetherion/monitor.ex       machine metrics: agents, MQTT plugs, the load generator
+lib/aetherion/machine.ex       cpu, mem, disk and net of this machine from /proc, for the aetherion agent
+lib/aetherion/agent.ex         the monitoring agent of a machine under test, and its sessions
 lib/aetherion/recorder.ex      what a Test records, and the metrics read from it
 lib/aetherion/stats.ex         statistics across runs
 lib/aetherion/report.ex        requests and samples files, summary, console report
@@ -52,10 +54,10 @@ lib/mix/tasks/aetherion.ex     mix aetherion run
 bin/aetherion                  the same command, and a clean stop on Ctrl+C
 rel/vm.args.eex                flags of the Erlang VM of the release
 packaging/debian/              the Debian 13 package: build.sh, and the files it installs
-packaging/ansible/             deploy.yml, which installs the package on main servers and workers
-test/                          511 tests; fixtures/full_suite.perf holds every example from the EBNF,
+packaging/ansible/             deploy.yml, which installs the package on main servers, workers and agents
+test/                          531 tests; fixtures/full_suite.perf holds every example from the EBNF,
                                server_helper.exs a local HTTP server and MQTT broker for the engine tests, and
-                               cluster_test.exs runs suites on worker nodes on this machine
+                               cluster_test.exs runs suites on worker and agent nodes on this machine
 examples/                      example suites, e.g. t1-basic-http-get-req.perf, and staging.perfcfg, an external
                                configuration file
 ```
@@ -168,11 +170,60 @@ the next run.
 Not across workers: an `add` from Actions to a list of Setup (C137) reaches Verify and Cleanup, but not the users of
 other workers during the run.
 
+## Monitoring agents
+
+A machine under test can be measured by Aetherion itself instead of node_exporter (C185). The same release runs there
+as `aetherion agent`, which only measures: `cpu`, `mem`, `disk` and `net` of its machine. Name the agent after its
+target, with the target's host:
+
+```sh
+# on every machine under test, left running; the same version and cookie as the main server
+export AETHERION_COOKIE=...
+bin/aetherion agent --name sutServer1@192.168.178.91
+```
+
+```
+Config {
+  sut {
+    socialNetwork { baseUrl = "http://192.168.178.91:8080"; }
+    sutServer1 {
+      host    = "192.168.178.91";
+      metrics = [cpu, mem, disk, net, power];
+      topics  { power = "tele/tasmota_64E19E/SENSOR"; }   // power still comes from the plug
+    }
+  }
+  monitoring {
+    interval = 1s;
+    format   = aetherion;
+    mqtt { broker = "mqtt://localhost:1883"; fields { power = "ENERGY.Power"; } }
+  }
+}
+```
+
+`format = aetherion` makes every target with metrics from an agent the node `<target>@<host>`, with the host of
+`baseUrl` when the target has no `host`. There is no `port`, `path`, `fields` or `metricsPort` for it, and `gpu`, or
+`power` without a topic, is rejected, since the agent does not measure them. The readings are the ones the engine
+computes from node_exporter, so a target reads the same with either agent: `cpu` from the per-mode counters of
+`/proc/stat` (C174), `mem` from `MemAvailable`, `disk` as the share of time spent on I/O of the whole disks, and
+`net` as received plus sent bytes per second (C186). Selectors work as with node_exporter: `cpu[0, 1]`,
+`disk["nvme0n1"]`, `net["eth0"]`.
+
+The agent samples at the monitoring interval on its own clock and keeps the samples until the main server takes them,
+at least every 250ms; the main server moves each sample to its own clock, as for workers. A late take loses nothing
+and does not move a sample in time.
+
+`aetherion run` connects to every agent before the first Test, like the workers, and checks that each runs the same
+code; an agent that cannot be reached is an error with exit code 2 (C132). A lost agent, or one that does not answer
+for 5 seconds, is reached again at once and then every second until the Test ends; the samples in between are lost,
+and the gap shows in the samples file. A machine can run a worker and an agent: they are two nodes, with two names and
+two ports, `4370` for the worker and `4371` for the agent in the Debian package.
+
 ## Deployment on Debian 13
 
 `packaging/debian/build.sh` builds a Debian 13 package, `packaging/debian/dist/aetherion_0.1.0-1_amd64.deb`, in a Debian
 13 container, so it needs only Docker. The package holds a release with its own Erlang runtime, so the servers need no
-Erlang, Elixir or build tools. The same package goes on the main server and on every worker:
+Erlang, Elixir or build tools. The same package goes on the main server, on every worker and on every machine under
+test with an agent:
 
 ```sh
 packaging/debian/build.sh                # RUN_TESTS=1 runs the tests first, on Debian's Elixir 1.18
@@ -189,13 +240,22 @@ sudoedit /etc/aetherion/worker.env       # AETHERION_NAME=euWorker1@10.0.0.11, A
 sudo systemctl enable --now aetherion-worker
 ```
 
-A worker accepts the main server on ports 4369 and 4370; the main server needs no open port. Installing the package
+On a machine under test, `/etc/aetherion/agent.env` does the same for the `aetherion-agent` service, on port 4371
+(C185):
+
+```sh
+sudoedit /etc/aetherion/agent.env        # AETHERION_NAME=sutServer1@192.168.178.91, AETHERION_COOKIE=...
+sudo systemctl enable --now aetherion-agent
+```
+
+A worker accepts the main server on ports 4369 and 4370, an agent on 4369 and 4371; the main server needs no open
+port. Installing the package
 again restarts a running worker, and every server must run the same version. The package's guide,
 `/usr/share/doc/aetherion/README.Debian` (`packaging/debian/files/README.Debian`), has the details.
 
-For many servers, `packaging/ansible/deploy.yml` installs the package on the main servers and workers of an inventory,
-writes each worker's `worker.env` with a cookie from a vault, starts the workers and checks that the main servers reach
-them (`packaging/ansible/README.md`):
+For many servers, `packaging/ansible/deploy.yml` installs the package on the main servers, workers and agents of an
+inventory, writes each worker's `worker.env` and each agent's `agent.env` with a cookie from a vault, starts them and
+checks that the main servers reach them (`packaging/ansible/README.md`):
 
 ```sh
 cd packaging/ansible
@@ -274,11 +334,12 @@ Config {
 
 Targets are flat (C156). A target with a `baseUrl` takes requests, and a target with `metrics` is a machine that is
 measured (C159). A target may be both. Without a `host`, a machine is measured at the host of `baseUrl`, so behind a
-load balancer the machines need targets of their own. `monitoring` says how (C158): `format` is `prometheus` or
-`json`, and `interval` and `path` default to `1s` and `/metrics`. A machine with a second agent is a second target
+load balancer the machines need targets of their own. `monitoring` says how (C158): `format` is `prometheus`,
+`json` or `aetherion` (see [Monitoring agents](#monitoring-agents)), and `interval` and `path` default to `1s` and
+`/metrics`. A machine with a second agent is a second target
 with the same `host` and its own `metricsPort`.
 
-With `prometheus` the engine computes `cpu`, `mem` and `disk` from node_exporter, and `fields` names a metric that is
+With `prometheus` the engine computes `cpu`, `mem`, `disk` and `net` from node_exporter, and `fields` names a metric that is
 already a percentage or, for `power`, in watts, such as `fields { gpu = "DCGM_FI_DEV_GPU_UTIL"; }`. With `json` every
 agent metric needs a field, a dotted path.
 
@@ -311,8 +372,10 @@ subscribed again. A broker that stops answering is noticed within 15 seconds (ke
 messages published in between are lost, not delivered late with a wrong arrival time; energy integrates over the gap as
 over any other time between samples. Only the first connection must succeed for the run to start.
 
-A selector narrows a metric: `cpu[0, 1]` by logical core, `gpu[2]` by device id, `disk["nvme0n1"]` by device name.
-Readings then cover only those devices.
+A selector narrows a metric: `cpu[0, 1]` by logical core, `gpu[2]` by device id, `disk["nvme0n1"]` by device name,
+`net["eth0"]` by interface. Readings then cover only those devices. Without a selector, `net` leaves out loopback and
+the virtual interfaces of containers, bridges and tunnels (`veth*`, `docker*`, `br-*`, ...), which would count the
+same bytes again (C186).
 
 A suite can keep its own `Config`. A target defined in both places is replaced as a whole by the definition in the
 file, and so is `monitoring`. `PerfLang.analyze/2` returns the AST with the merged `Config`, so the engine reads it
@@ -326,6 +389,7 @@ Machine metrics are read like `cpu` (C109, C160), in Verify, `stopIf` and Cleanu
 assert sut.euCentralDb.mem.max() < 80%;       // one target
 assert sut.mem.mean() < 50%;                  // all targets that list it
 assert sut.euCentralApp.power.mean() < 200W;  // power gives a Power
+assert sut.euCentralApp.net.max() < 100MB/s;   // net gives a DataRate: B/s, kB/s, MB/s, GB/s (C186)
 assert loadGenerator.cpu.max() < 70%;         // read locally, no agent; with workers, on the workers (C183)
 ```
 
@@ -519,7 +583,7 @@ by those rows.
 
 The summary is one JSON object (C121). `version` changes with the layout; this is version 4, the same for one run or
 several (C180), which adds `workers` to each Test of version 3 (C183). Times are in milliseconds, percentages are
-numbers from 0 to 100, energy is in joules, power in watts and carbon in grams of CO2e. `runs` holds every run with its
+numbers from 0 to 100, energy is in joules, power in watts, carbon in grams of CO2e and `net` in bytes per second. `runs` holds every run with its
 Tests, and `tests` each Test across the counted runs. `workers` is empty for a run on one machine.
 
 ```json

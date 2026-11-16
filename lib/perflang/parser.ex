@@ -85,6 +85,7 @@ defmodule PerfLang.Parser do
   defp literal_kind(:energy_lit), do: "Energy"
   defp literal_kind(:power_lit), do: "Power"
   defp literal_kind(:carbon_lit), do: "Carbon"
+  defp literal_kind(:data_rate_lit), do: "DataRate"
   defp literal_kind(:carbon_intensity_lit), do: "carbon intensity"
 
   @reserved ~w(let mut fn if else while for in match return assert check map filter fold foldl foldr

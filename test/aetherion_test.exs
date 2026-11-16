@@ -1552,6 +1552,40 @@ defmodule AetherionTest do
       assert samples > 2
     end
 
+    test "net is received plus sent bytes per second, without loopback and virtual interfaces (C186)" do
+      steps = :counters.new(1, [])
+
+      # 2kB more on eth0 per scrape, 2MB on lo and veth1; scrapes are about 20ms apart.
+      agent =
+        server(fn _ ->
+          :counters.add(steps, 1, 1)
+          step = :counters.get(steps, 1)
+
+          {200,
+           """
+           node_network_receive_bytes_total{device="eth0"} #{step * 1000}
+           node_network_transmit_bytes_total{device="eth0"} #{step * 1000}
+           node_network_receive_bytes_total{device="lo"} #{step * 1_000_000}
+           node_network_transmit_bytes_total{device="lo"} #{step * 1_000_000}
+           node_network_receive_bytes_total{device="veth1"} #{step * 2_000_000}
+           """}
+        end)
+
+      api = server(fn _ -> 200 end)
+
+      source =
+        monitored(api, agent, "net", "", """
+        assert sut.box.net.mean() > 0B/s;
+        assert sut.box.net.max() < 1MB/s;
+        """)
+
+      result = run(source)
+      assert result.exit_code == 0, inspect(hd(tests(result)).verify)
+
+      lo = monitored(api, agent, ~s|net["lo"]|, "", "assert sut.box.net.mean() > 10MB/s;")
+      assert run(lo).exit_code == 0
+    end
+
     test "the console report shows the readings of each measured target" do
       steps = :counters.new(1, [])
 

@@ -1,7 +1,8 @@
 defmodule Aetherion.Release do
   @moduledoc """
-  The command line of the release: `aetherion run ...` and `aetherion worker ...`, the
-  same as `mix aetherion` (`Aetherion.CLI`), for servers without Elixir.
+  The command line of the release: `aetherion run ...`, `aetherion worker ...` and
+  `aetherion agent ...`, the same as `mix aetherion` (`Aetherion.CLI`), for servers
+  without Elixir.
 
   The `aetherion` command of the Debian package (packaging/debian) runs
   `/opt/aetherion/bin/aetherion eval "Aetherion.Release.main()" -- args`. eval starts

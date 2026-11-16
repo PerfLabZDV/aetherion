@@ -403,6 +403,11 @@ defmodule PerfLang.AST do
     defstruct [:loc, :type, :value, :unit, :raw]
   end
 
+  defmodule DataRateLiteral do
+    @moduledoc "A DataRate in bytes per second (C186). `unit` is :\"B/s\", :\"kB/s\", :\"MB/s\" or :\"GB/s\"."
+    defstruct [:loc, :type, :value, :unit, :raw]
+  end
+
   defmodule UsersLiteral do
     @moduledoc "A VirtualUsers literal (C94, C95). `value` is a whole number."
     defstruct [:loc, :type, :value, :raw]
@@ -549,6 +554,9 @@ defmodule PerfLang.AST do
 
   def literal(:carbon, loc, {raw, num, unit}),
     do: %CarbonLiteral{loc: loc, value: number(num), unit: unit, raw: raw}
+
+  def literal(:data_rate, loc, {raw, num, unit}),
+    do: %DataRateLiteral{loc: loc, value: number(num), unit: unit, raw: raw}
 
   def literal(:carbon_intensity, loc, {raw, num}),
     do: %CarbonIntensityLiteral{loc: loc, value: number(num), raw: raw}

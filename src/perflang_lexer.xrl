@@ -47,7 +47,7 @@ Rules.
 "([^"\\\n]|\\[^\n])*"               : {token, {lex_error, TokenLine, {bad_escape, TokenChars}}}.
 "([^"\\\n]|\\[^\n])*\\?             : {token, {lex_error, TokenLine, {unterminated_string, TokenChars}}}.
 
-%% ---------- Literals with units (C14, C15, C29, C40-C42, C94) ----------
+%% ---------- Literals with units (C14, C15, C29, C40-C42, C94, C186) ----------
 %% Units are case-sensitive and read longest-match first, so 5ms is
 %% milliseconds, 5mJ millijoules and 5mW milliwatts.
 
@@ -56,6 +56,8 @@ Rules.
 {NUM}(mW|W|kW)                      : {token, {power_lit, TokenLine, TokenChars}}.
 {NUM}(mgCO2e|gCO2e|kgCO2e)          : {token, {carbon_lit, TokenLine, TokenChars}}.
 {NUM}gCO2e/kWh                      : {token, {carbon_intensity_lit, TokenLine, TokenChars}}.
+%% data rate literal (C186): bytes per second, decimal prefixes like kW.
+{NUM}(B|kB|MB|GB)/s                 : {token, {data_rate_lit, TokenLine, TokenChars}}.
 {INT}vu                             : {token, {users_lit, TokenLine, TokenChars}}.
 {D}+\.{D}+vu                        : {token, {lex_error, TokenLine, {fractional_users, TokenChars}}}.
 

@@ -3,3 +3,8 @@
   ansible.builtin.command:
     argv: [systemctl, try-restart, aetherion-worker]
   changed_when: true
+
+- name: Restart the agent
+  ansible.builtin.command:
+    argv: [systemctl, try-restart, aetherion-agent]
+  changed_when: true

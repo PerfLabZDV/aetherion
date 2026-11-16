@@ -2,8 +2,9 @@ defmodule Aetherion.Monitor do
   @moduledoc """
   Samples the machines of a Test (C158-C164).
 
-  An agent is scraped once per interval, an MQTT message is a sample when it
-  arrives, and the load generator is read locally. Sampling runs from Setup to
+  An agent is scraped once per interval, an aetherion agent (C185) samples on
+  its own and is taken from, an MQTT message is a sample when it arrives, and the
+  load generator is read locally. Sampling runs from Setup to
   Cleanup; readings and energy use only the samples inside the measured window
   (C162). Every sample is kept in an ETS table, for the samples file (C173).
 
@@ -12,7 +13,7 @@ defmodule Aetherion.Monitor do
   `loadGenerator.<worker>`.
   """
 
-  alias Aetherion.{Http, Recorder, Values}
+  alias Aetherion.{Cluster, Http, Machine, Recorder, Values}
 
   @load_generator "loadGenerator"
 
@@ -28,27 +29,36 @@ defmodule Aetherion.Monitor do
       table: :ets.new(:samples, [:ordered_set, :public, write_concurrency: true]),
       phase: :atomics.new(1, []),
       pids: [],
+      aetherion: [],
       mqtt: nil
     }
 
     agents =
-      for {name, target} <- rt.targets, agent_metrics(target) != [], do: start_agent(monitor, name, target)
+      for {name, target} <- rt.targets,
+          rt.monitoring.format != "aetherion",
+          agent_metrics(target) != [],
+          do: start_agent(monitor, name, target)
 
     pids = if rt.workers == [], do: [start_local(monitor) | agents], else: agents
+    monitor = %{monitor | pids: pids}
+    monitor = guarded(monitor, fn -> %{monitor | aetherion: start_aetherion(monitor)} end)
+    guarded(monitor, fn -> %{monitor | mqtt: start_mqtt(monitor)} end)
+  end
 
-    try do
-      %{monitor | pids: pids, mqtt: start_mqtt(monitor)}
-    rescue
-      error in Error ->
-        stop(%{monitor | pids: pids})
-        delete(monitor)
-        reraise error, __STACKTRACE__
-    end
+  # A source that cannot start stops the ones started before it.
+  defp guarded(monitor, start) do
+    start.()
+  rescue
+    error in Error ->
+      stop(monitor)
+      delete(monitor)
+      reraise error, __STACKTRACE__
   end
 
   @doc "Stops the sampling and waits for it, so that nothing writes after this returns."
-  def stop(%{pids: pids, mqtt: mqtt}) do
+  def stop(%{pids: pids, aetherion: aetherion, mqtt: mqtt}) do
     if mqtt, do: stop_mqtt(mqtt)
+    stop_pollers(aetherion)
 
     for pid <- pids do
       ref = Process.monitor(pid)
@@ -192,7 +202,7 @@ defmodule Aetherion.Monitor do
     end
   end
 
-  @device_labels %{"cpu" => "cpu", "gpu" => "gpu", "disk" => "device"}
+  @device_labels %{"cpu" => "cpu", "gpu" => "gpu", "disk" => "device", "net" => "device"}
 
   defp selected?(_labels, _metric, []), do: true
 
@@ -205,7 +215,7 @@ defmodule Aetherion.Monitor do
 
     cond do
       values == [] -> {nil, previous}
-      metric == "power" -> {Enum.sum(values), previous}
+      metric in ["power", "net"] -> {Enum.sum(values), previous}
       true -> {Enum.sum(values) / length(values), previous}
     end
   end
@@ -259,6 +269,22 @@ defmodule Aetherion.Monitor do
     end
   end
 
+  # Received plus sent bytes per second (C186), between two scrapes, summed over
+  # the interfaces; without a selector loopback and virtual interfaces are left
+  # out, as the aetherion agent does.
+  defp prometheus_reading(series, "net", nil, devices, previous, now) do
+    counters =
+      for {name, labels, value} <- series,
+          name in ["node_network_receive_bytes_total", "node_network_transmit_bytes_total"],
+          Machine.interface?(labels["device"], devices),
+          reduce: %{} do
+        counters -> Map.update(counters, labels["device"], value, &(&1 + value))
+      end
+
+    {value, state} = Machine.rate(counters, previous["net"], now)
+    {value, Map.put(previous, "net", state)}
+  end
+
   defp prometheus_reading(_series, _metric, nil, _devices, previous, _now), do: {nil, previous}
 
   defp sum_values(rows), do: rows |> Enum.map(&elem(&1, 1)) |> Enum.sum()
@@ -297,6 +323,176 @@ defmodule Aetherion.Monitor do
       [] -> nil
       numbers -> Enum.sum(numbers) / length(numbers)
     end
+  end
+
+  # ---------- The aetherion agent (C185) ----------
+
+  # A lost agent is reached again at once, then every @agent_retry ms until the
+  # Test ends. An agent that does not answer a take within @take_timeout ms is
+  # lost too. Samples are taken every @take_ms ms at most, so stopIf and the
+  # phase of each sample are close to the time it was taken.
+  @agent_retry 1000
+  @take_timeout 5000
+  @take_ms 250
+
+  defp start_aetherion(%{rt: %{monitoring: %{format: "aetherion"}} = rt} = monitor) do
+    targets = for {name, target} <- Enum.sort(rt.targets), agent_metrics(target) != [], do: {name, target}
+
+    if targets != [] and not Node.alive?() do
+      raise Error,
+            "format = aetherion needs a distributed node to reach the agents; " <>
+              "run the suite with `aetherion run`, which connects to them (C185)"
+    end
+
+    Enum.reduce(targets, [], fn {name, target}, started ->
+      try do
+        [start_poller(monitor, name, target) | started]
+      rescue
+        error in Error ->
+          stop_pollers(started)
+          reraise error, __STACKTRACE__
+      end
+    end)
+  end
+
+  defp start_aetherion(_monitor), do: []
+
+  @doc "The node of the aetherion agent of a target, `name@host` (C185)."
+  def agent_node(name, target),
+    do: String.to_atom("#{name}@#{target.host || URI.parse(target.base_url).host}")
+
+  defp start_poller(monitor, name, target) do
+    parent = self()
+    ref = make_ref()
+    node = agent_node(name, target)
+    pid = spawn(fn -> poller_start(monitor, name, node, agent_metrics(target), parent, ref) end)
+
+    receive do
+      {^ref, :ok} ->
+        pid
+
+      {^ref, {:error, message}} ->
+        raise Error, message
+    after
+      15_000 ->
+        Process.exit(pid, :kill)
+        raise Error, "the agent #{node} did not answer (C185)"
+    end
+  end
+
+  defp poller_start(monitor, name, node, metrics, parent, ref) do
+    agent = %{monitor: monitor, name: name, node: node, metrics: metrics, session: nil, ref: nil, offset: 0}
+
+    case agent_session(agent) do
+      {:ok, agent} ->
+        send(parent, {ref, :ok})
+        Process.send_after(self(), :perflang_take, take_ms(monitor))
+        poller_loop(agent)
+
+      {:error, message} ->
+        send(parent, {ref, {:error, message}})
+    end
+  end
+
+  # A new session on the agent, with the offset of its clock, measured again
+  # since the agent may have restarted.
+  defp agent_session(agent) do
+    interval = agent.monitor.rt.monitoring.interval_ms
+
+    with :ok <- Cluster.reach(agent.node, :agent) do
+      try do
+        offset = Cluster.offset(agent.node)
+        args = [self(), agent.metrics, interval]
+        session = :erpc.call(agent.node, Aetherion.Agent, :start_session, args, @take_timeout)
+        {:ok, %{agent | session: session, ref: Process.monitor(session), offset: offset}}
+      catch
+        kind, reason ->
+          {:error,
+           "cannot start a session on the agent #{agent.node}: #{Exception.format_banner(kind, reason)}"}
+      end
+    end
+  end
+
+  defp poller_loop(%{ref: ref} = agent) do
+    receive do
+      :perflang_take ->
+        Process.send_after(self(), :perflang_take, take_ms(agent.monitor))
+        poller_loop(take(agent))
+
+      :perflang_reconnect ->
+        case agent_session(agent) do
+          {:ok, agent} ->
+            poller_loop(agent)
+
+          {:error, _message} ->
+            Process.send_after(self(), :perflang_reconnect, @agent_retry)
+            poller_loop(agent)
+        end
+
+      :perflang_stop ->
+        agent = take(agent)
+        if agent.session, do: send(agent.session, :stop)
+
+      {:DOWN, ^ref, :process, _pid, _reason} ->
+        poller_loop(lost(agent))
+
+      # A reply that came after its take was given up.
+      _other ->
+        poller_loop(agent)
+    end
+  end
+
+  defp take_ms(monitor), do: min(monitor.rt.monitoring.interval_ms, @take_ms)
+
+  defp take(%{session: nil} = agent), do: agent
+
+  defp take(%{session: session, ref: ref} = agent) do
+    tag = make_ref()
+    send(session, {:aetherion_take, self(), tag})
+
+    receive do
+      {^tag, samples} ->
+        for {metric, value, at, wall} <- samples,
+            do: store(agent.monitor, agent.name, metric, value, at + agent.offset, wall)
+
+        agent
+
+      {:DOWN, ^ref, :process, _pid, _reason} ->
+        lost(agent)
+    after
+      @take_timeout ->
+        # A connection that only looks alive is dropped, so the next attempt opens a new one.
+        Node.disconnect(agent.node)
+        lost(agent)
+    end
+  end
+
+  defp lost(agent) do
+    if agent.ref, do: Process.demonitor(agent.ref, [:flush])
+    send(self(), :perflang_reconnect)
+    %{agent | session: nil, ref: nil}
+  end
+
+  # The last take of each, then the end of its session.
+  defp stop_pollers(pids) do
+    Enum.each(pids, &send(&1, :perflang_stop))
+
+    for pid <- pids do
+      ref = Process.monitor(pid)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+      after
+        @take_timeout + 1000 ->
+          Process.exit(pid, :kill)
+
+          receive do
+            {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+          end
+      end
+    end
+
+    :ok
   end
 
   # ---------- The load generator (C160) ----------
@@ -511,6 +707,7 @@ defmodule Aetherion.Monitor do
   defp covered(_monitor, {:target, name}, _metric), do: [name]
 
   defp wrap("power", value), do: {:power, value}
+  defp wrap("net", value), do: {:data_rate, value}
   defp wrap(_metric, value), do: {:percentage, value}
 
   @doc "A machine reading. `:error` when a target it covers has no sample in the window (C164)."

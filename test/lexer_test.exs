@@ -84,6 +84,20 @@ defmodule PerfLang.LexerTest do
              ]
     end
 
+    test "data rate literals are one token, in bytes per second (C186)" do
+      assert values("1B/s 2.5kB/s 50MB/s 1GB/s") == [
+               {"1B/s", "1", :"B/s"},
+               {"2.5kB/s", "2.5", :"kB/s"},
+               {"50MB/s", "50", :"MB/s"},
+               {"1GB/s", "1", :"GB/s"}
+             ]
+
+      assert categories("50MB/s") == [:data_rate_lit]
+      assert error("5Mbit/s").message =~ "DataRate: B/s kB/s MB/s GB/s"
+      assert error("5mB/s").message =~ ~s("mB" is not a unit)
+      assert error("5MB").message =~ ~s("MB" is not a unit)
+    end
+
     test "units are case-sensitive" do
       assert error("5j").message =~ ~s("j" is not a unit)
       assert error("5KW").message =~ ~s("KW" is not a unit)

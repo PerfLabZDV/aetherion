@@ -305,7 +305,7 @@ defmodule PerfLang.ValidatorTest do
       assert config_errors(~s(Config { sut { a { baseUrl = "http://a"; metrics = [cpu]; } } })) == []
 
       assert [m1] = config_errors(~s(Config { sut { a { host = "h"; metrics = [ram]; } } }))
-      assert m1 =~ "unknown metric ram; use cpu, mem, disk, gpu, power (C159)"
+      assert m1 =~ "unknown metric ram; use cpu, mem, disk, net, gpu, power (C159)"
 
       assert [m2] = config_errors(~s(Config { sut { a { host = "h"; metrics = []; } } }))
       assert m2 =~ "metrics needs at least one metric"
@@ -332,6 +332,21 @@ defmodule PerfLang.ValidatorTest do
 
       assert [m4] = config_errors(~s(Config { sut { a { host = "h"; metrics = [cpu["a"]]; } } }))
       assert m4 =~ ~s|cpu selects devices by number, not "a" (C159)|
+    end
+
+    test "net is a metric, selected by interface name (C186)" do
+      assert config_errors(~s(Config { sut { a { host = "h"; metrics = [net, cpu]; } } })) == []
+      assert config_errors(~s(Config { sut { a { host = "h"; metrics = [net["eth0", "eth1"]]; } } })) == []
+
+      assert [m1] = config_errors(~s(Config { sut { a { host = "h"; metrics = [net[0]]; } } }))
+      assert m1 =~ ~s|net selects devices by name, e.g. net["eth0"], not 0 (C186)|
+
+      assert [m2] = config_errors(~s(Config { sut { net { host = "h"; } } }))
+      assert m2 =~ "a sut target cannot be named net"
+    end
+
+    test "aetherion is a format (C185)" do
+      assert config_errors(~s(Config { monitoring { format = aetherion; } })) == []
     end
 
     test "metricsPort needs metrics, and fits a port (C158, C159)" do
@@ -476,7 +491,7 @@ defmodule PerfLang.ValidatorTest do
             {"port = 0;", "port 0 must be from 1 to 65535 (C158)"},
             {"port = 70000;", "port 70000 must be from 1 to 65535"},
             {~s(path = "metrics";), ~s|path "metrics" must start with "/" (C158)|},
-            {"format = xml;", "unknown format xml; use prometheus or json (C158)"},
+            {"format = xml;", "unknown format xml; use prometheus, json or aetherion (C158, C185)"},
             {"carbonIntensity = 0gCO2e/kWh;", "carbonIntensity 0gCO2e/kWh must be greater than 0 (C161)"},
             {"port = 1; port = 2;", "duplicate port in monitoring"}
           ] do

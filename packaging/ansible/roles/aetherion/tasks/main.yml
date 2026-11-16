@@ -15,14 +15,29 @@
   ansible.builtin.assert:
     that:
       - aetherion_worker_name is match('^[A-Za-z][A-Za-z0-9_]*$')
-      - aetherion_worker_name not in ['cpu', 'mem', 'disk', 'gpu', 'power']
+      - aetherion_worker_name not in ['cpu', 'mem', 'disk', 'net', 'gpu', 'power']
       - aetherion_worker_host is match('^[^@\s"]+$')
     fail_msg: >-
       {{ aetherion_worker_name }}@{{ aetherion_worker_host }} is not a worker's node name: the name
-      needs letters, digits and _, starting with a letter, and cannot be cpu, mem, disk, gpu or
-      power (C181, C183). Set aetherion_worker_name for this host.
+      needs letters, digits and _, starting with a letter, and cannot be cpu, mem, disk, net, gpu
+      or power (C181, C183). Set aetherion_worker_name for this host.
     quiet: true
   when: inventory_hostname in groups['aetherion_workers'] | default([])
+
+- name: Check the agent's node name
+  ansible.builtin.assert:
+    that:
+      - aetherion_agent_name is match('^[A-Za-z][A-Za-z0-9_]*$')
+      - aetherion_agent_name not in ['cpu', 'mem', 'disk', 'net', 'gpu', 'power', 'any']
+      - aetherion_agent_host is match('^[^@\s"/]+$')
+      - aetherion_agent_dist_port != aetherion_dist_port
+    fail_msg: >-
+      {{ aetherion_agent_name }}@{{ aetherion_agent_host }} is not an agent's node name: the name is
+      the target in the suites, with letters, digits and _, starting with a letter, and cannot be
+      cpu, mem, disk, net, gpu, power or any (C109, C168, C185), and the agent needs a port of its
+      own. Set aetherion_agent_name for this host.
+    quiet: true
+  when: inventory_hostname in groups['aetherion_agents'] | default([])
 
 - name: Check that the package is built
   ansible.builtin.stat:
@@ -133,6 +148,57 @@
   when: inventory_hostname in groups['aetherion_workers'] | default([])
   tags: service
 
+# The monitoring agents (C185).
+
+- name: Write the agent's configuration
+  ansible.builtin.template:
+    src: agent.env.j2
+    dest: /etc/aetherion/agent.env
+    owner: root
+    group: aetherion
+    mode: "0640"
+  diff: false
+  notify: Restart the agent
+  when: inventory_hostname in groups['aetherion_agents'] | default([])
+
+- name: Let the main servers in to the agent
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ item[0] }}"
+    to_port: "{{ item[1] }}"
+    proto: tcp
+    comment: aetherion agent
+  loop: "{{ aetherion_main_hosts | product(['4369', aetherion_agent_dist_port | string]) | list }}"
+  vars:
+    aetherion_main_hosts: >-
+      {%- set hosts = [] -%}
+      {%- for host in groups['aetherion_main'] | default([]) -%}
+      {%- set _ = hosts.append(hostvars[host].ansible_host | default(host)) -%}
+      {%- endfor -%}
+      {{ hosts }}
+  when:
+    - inventory_hostname in groups['aetherion_agents'] | default([])
+    - aetherion_ufw | bool
+
+- name: Start the agent, and at boot
+  ansible.builtin.systemd_service:
+    name: aetherion-agent
+    enabled: true
+    state: started
+  when: inventory_hostname in groups['aetherion_agents'] | default([])
+  tags: service
+
+- name: Restart agents with a new configuration
+  ansible.builtin.meta: flush_handlers
+  tags: service
+
+- name: Wait for the agent
+  ansible.builtin.wait_for:
+    port: "{{ aetherion_agent_dist_port }}"
+    timeout: 60
+  when: inventory_hostname in groups['aetherion_agents'] | default([])
+  tags: service
+
 # The main servers.
 
 # From the inventory, not from the workers' facts, so that --limit to the main servers works.
@@ -173,6 +239,17 @@
     port: "{{ item[1] }}"
     timeout: 10
   loop: "{{ aetherion_workers | default([]) | product(['4369', aetherion_dist_port | string]) | list }}"
+  loop_control:
+    label: "{{ item[0] }} port {{ item[1] }}"
+  when: inventory_hostname in groups['aetherion_main'] | default([])
+  tags: service
+
+- name: Check that the main server reaches every agent
+  ansible.builtin.wait_for:
+    host: "{{ hostvars[item[0]].aetherion_agent_host | default(hostvars[item[0]].ansible_host | default(item[0])) }}"
+    port: "{{ item[1] }}"
+    timeout: 10
+  loop: "{{ groups['aetherion_agents'] | default([]) | product(['4369', aetherion_agent_dist_port | string]) | list }}"
   loop_control:
     label: "{{ item[0] }} port {{ item[1] }}"
   when: inventory_hostname in groups['aetherion_main'] | default([])

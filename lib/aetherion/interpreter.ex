@@ -18,7 +18,7 @@ defmodule Aetherion.Interpreter do
   alias PerfLang.AST
   alias Aetherion.{Cells, Http, Monitor, Recorder, Source, Values}
 
-  @machine_metrics ["cpu", "mem", "disk", "gpu", "power"]
+  @machine_metrics ["cpu", "mem", "disk", "net", "gpu", "power"]
   @any {__MODULE__, :any_target}
   @snapshot {__MODULE__, :snapshot}
   @env {__MODULE__, :env}

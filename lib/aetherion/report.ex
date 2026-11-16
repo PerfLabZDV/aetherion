@@ -274,8 +274,7 @@ defmodule Aetherion.Report do
     estimate(device, "power", get_in(metrics, [:power, :mean]), "W")
 
     for target <- test.aggregate.targets, {metric, stats} <- Enum.sort(target[:readings] || %{}) do
-      unit = if metric == "power", do: "W", else: "%"
-      estimate(device, "#{target.name} #{metric} mean", stats[:mean], unit)
+      estimate(device, "#{target.name} #{metric} mean", stats[:mean], unit(metric))
     end
 
     for {metric, stats} <- Enum.sort(test.aggregate.loadGenerator || %{}) do
@@ -383,11 +382,15 @@ defmodule Aetherion.Report do
       )
   end
 
-  # Power is in watts, every other reading a Percentage (C160).
+  # Power is in watts, net in bytes per second, every other reading a Percentage (C160, C186).
+  defp unit("power"), do: "W"
+  defp unit("net"), do: "B/s"
+  defp unit(_metric), do: "%"
+
   defp reading(_metric, %{samples: 0}), do: "no value (0 samples)"
 
   defp reading(metric, stats) do
-    unit = if metric == "power", do: "W", else: "%"
+    unit = unit(metric)
     "mean #{number(stats.mean)}#{unit} max #{number(stats.max)}#{unit} (#{stats.samples} samples)"
   end
 

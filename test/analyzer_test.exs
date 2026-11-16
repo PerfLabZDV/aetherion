@@ -402,6 +402,14 @@ defmodule PerfLang.AnalyzerTest do
       assert actions_type("5s / 2s") == :float
     end
 
+    test "DataRate (C186)" do
+      assert actions_type("10MB/s") == :data_rate
+      assert actions_type("10MB/s + 1kB/s") == :data_rate
+      assert actions_type("2 * 1GB/s") == :data_rate
+      assert actions_type("10MB/s / 1kB/s") == :float
+      assert_error(actions("let a = 1MB/s + 1W;"), "+ cannot be used on DataRate and Power (C142)")
+    end
+
     test "physical conversions" do
       assert actions_type("10J / 5s") == :power
       assert actions_type("2W * 5s") == :energy
@@ -743,6 +751,83 @@ defmodule PerfLang.AnalyzerTest do
         errors(source, config.("power", "format = prometheus;")),
         "target a reads power from an agent"
       )
+    end
+
+    test "the aetherion agent needs no port, and measures cpu, mem, disk and net (C185)" do
+      source = "TestSuite S { Load { } Test T { Actions { } } }"
+
+      config = fn target, monitoring ->
+        ~s|Config { sut { a { #{target} } } monitoring { format = aetherion; #{monitoring} } }|
+      end
+
+      assert errors(source, config.(~s|host = "h"; metrics = [cpu[0], mem, disk["sda"], net["eth0"]];|, "")) ==
+               []
+
+      assert errors(source, config.(~s|baseUrl = "http://h:8080"; metrics = [cpu];|, "")) == []
+
+      # A metric with a topic comes over MQTT; the agent does not read it.
+      assert errors(
+               source,
+               config.(
+                 ~s|host = "h"; metrics = [cpu, power]; topics { power = "p"; }|,
+                 ~s|mqtt { broker = "mqtt://b"; }|
+               )
+             ) == []
+
+      assert_error(
+        errors(source, config.(~s|host = "h"; metrics = [cpu, gpu];|, "")),
+        "the aetherion agent measures cpu, mem, disk and net, not gpu; give gpu a topic (C163), " <>
+          "or read target a with format prometheus or json (C185)"
+      )
+
+      assert_error(
+        errors(source, config.(~s|host = "h"; metrics = [power];|, "")),
+        "not power; give power a topic"
+      )
+
+      assert_error(
+        errors(source, config.(~s|host = "h"; metrics = [cpu]; metricsPort = 9100;|, "")),
+        "metricsPort is for an agent over HTTP; with format = aetherion the agent of a is the node a@<host> (C185)"
+      )
+
+      for setting <- ["port = 9100;", ~s|path = "/m";|, ~s|fields { cpu = "c"; }|] do
+        [name | _] = String.split(setting, " ")
+
+        assert_error(
+          errors(source, config.(~s|host = "h"; metrics = [cpu];|, setting)),
+          "#{name} is for an agent over HTTP; with format = aetherion each agent is the node <target>@<host> (C185)"
+        )
+      end
+
+      assert_error(
+        errors(source, config.(~s|host = "me@h"; metrics = [cpu];|, "")),
+        "the host of target a cannot hold @; its agent is a@<host> (C185)"
+      )
+    end
+
+    test "an aetherion agent and a worker are separate nodes (C181, C185)" do
+      source = "TestSuite S { Load { } Test T { Actions { } } }"
+
+      assert_error(
+        errors(
+          source,
+          ~s|Config { sut { w1 { host = "10.0.0.1"; metrics = [cpu]; } } monitoring { format = aetherion; } workers { w1 { host = "10.0.0.1"; } } }|
+        ),
+        "target w1 and the worker w1 are both the node w1@10.0.0.1"
+      )
+
+      assert errors(
+               source,
+               ~s|Config { sut { a1 { host = "10.0.0.1"; metrics = [cpu]; } } monitoring { format = aetherion; } workers { w1 { host = "10.0.0.1"; } } }|
+             ) == []
+    end
+
+    test "net is a DataRate (C186)" do
+      config = ~s|Config { sut { a { host = "h"; metrics = [net]; } } monitoring { format = aetherion; } }|
+      verify = fn statement -> "TestSuite S { Load { } Test T { Actions { } Verify { #{statement} } } }" end
+
+      assert errors(verify.("assert sut.a.net.max() < 100MB/s; assert sut.net.mean() >= 0B/s;"), config) == []
+      assert_error(errors(verify.("assert sut.a.net.max() < 50%;"), config), "DataRate and Percentage")
     end
 
     test "json needs a field for every agent metric (C158)" do

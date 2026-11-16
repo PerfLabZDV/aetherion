@@ -1,6 +1,6 @@
 #!/bin/sh
-# aetherion run file.perf [...] and aetherion worker --name name@host, from the
-# release in /opt/aetherion. Paths stay relative to where it is called (C119).
+# aetherion run file.perf [...], aetherion worker --name name@host and aetherion
+# agent --name name@host, from the release in /opt/aetherion. Paths stay relative to where it is called (C119).
 #
 # The Erlang VM cannot catch SIGINT, so a plain Ctrl+C would skip Cleanup. This
 # keeps the VM from seeing it and sends SIGTERM, which stops a run cleanly (C155).

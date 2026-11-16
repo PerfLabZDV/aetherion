@@ -25,7 +25,8 @@ defmodule PerfLang.Analyzer do
       baseUrl, machine readings a target that lists the metric, a reading
       of one load generator, loadGenerator.euWorker1.cpu.max(), a worker of
       that name, metrics from
-      an agent a format, a port and any field they need, topics need mqtt,
+      an agent a format, a port and any field they need, the aetherion agent
+      (C185) no port and only the metrics it measures, topics need mqtt,
       energy, power and carbon metrics a target that lists power, and sut.any
       Actions and a distribution.
     * Built-ins and curves (C28, C56, C144, C152): arguments, curve use in
@@ -38,7 +39,7 @@ defmodule PerfLang.Analyzer do
 
   Every expression in the returned AST has its `type` set to one of these:
   `:bool`, `:string`, `:json`, `:unit`, `:int`, `:float`, `:time`, `:energy`,
-  `:power`, `:carbon`, `:percentage`, `:users`, `:response`, `:target`,
+  `:power`, `:carbon`, `:data_rate`, `:percentage`, `:users`, `:response`, `:target`,
   `{:list, type}` or `{:fn, params, return}`. `:unknown` is an empty list
   that no use gave a type (C140). A `sut` or `http` namespace has none.
   """
@@ -46,7 +47,7 @@ defmodule PerfLang.Analyzer do
   alias PerfLang.{AST, Error}
 
   @numbers [:int, :float]
-  @units [:time, :energy, :power, :carbon]
+  @units [:time, :energy, :power, :carbon, :data_rate]
   @ordered @units ++ [:percentage, :users]
   @conversions [:int, :float, :bool, :string]
   @text_types [:int, :float, :bool, :string, :json, :unknown] ++ @ordered
@@ -62,6 +63,7 @@ defmodule PerfLang.Analyzer do
     "Energy" => :energy,
     "Power" => :power,
     "Carbon" => :carbon,
+    "DataRate" => :data_rate,
     "Percentage" => :percentage,
     "VirtualUsers" => :users,
     "Response" => :response,
@@ -82,6 +84,7 @@ defmodule PerfLang.Analyzer do
     "cpu" => :percentage,
     "mem" => :percentage,
     "disk" => :percentage,
+    "net" => :data_rate,
     "gpu" => :percentage,
     "power" => :power
   }
@@ -125,7 +128,8 @@ defmodule PerfLang.Analyzer do
       curve_calls: %{}
     }
 
-    {ast, st} = suite(ast, ast.config |> measured_targets(st) |> then(&duplicates(ast, &1)))
+    st = ast.config |> measured_targets(st) |> then(&aetherion_monitoring(ast.config, &1))
+    {ast, st} = suite(ast, duplicates(ast, st))
 
     case st.errors do
       [] -> {:ok, finish(ast, st)}
@@ -201,10 +205,13 @@ defmodule PerfLang.Analyzer do
         do: field.metric
   end
 
-  # With prometheus the engine computes cpu, mem and disk from node_exporter;
-  # everything else names where the value is (C158).
+  # With prometheus the engine computes cpu, mem, disk and net from
+  # node_exporter; everything else names where the value is (C158, C186).
   defp needs_field?("prometheus", metric), do: metric in ["gpu", "power"]
   defp needs_field?(_format, _metric), do: true
+
+  # What the aetherion agent measures itself (C185).
+  @aetherion_metrics ["cpu", "mem", "disk", "net"]
 
   # Metrics from an agent need a format and a port, which metricsPort may give
   # (C158). Metrics with a topic come over MQTT instead (C163).
@@ -225,6 +232,9 @@ defmodule PerfLang.Analyzer do
 
         AST.MonitorFormat not in st.monitoring ->
           error(st, target, "target #{name} lists metrics from an agent, so monitoring needs a format (C158)")
+
+        st.agent_format == "aetherion" ->
+          aetherion_target(st, target, listed -- topics)
 
         AST.MonitorPort not in st.monitoring and not own_port? ->
           error(
@@ -248,6 +258,114 @@ defmodule PerfLang.Analyzer do
           end)
       end
     end)
+  end
+
+  # The aetherion agent of a target is the node <target>@<host> (C185): it needs
+  # no port, and measures cpu, mem, disk and net.
+  defp aetherion_target(st, %AST.SutTarget{name: name, settings: settings}, from_agent) do
+    st =
+      case Enum.find(settings, &match?(%AST.MetricsPort{}, &1)) do
+        nil ->
+          st
+
+        port ->
+          error(
+            st,
+            port,
+            "metricsPort is for an agent over HTTP; with format = aetherion the agent of #{name} is the node #{name}@<host> (C185)"
+          )
+      end
+
+    st =
+      case Enum.find(settings, &match?(%AST.Host{}, &1)) do
+        %AST.Host{value: %AST.StringLiteral{value: host} = value} ->
+          if String.contains?(host, "@"),
+            do:
+              error(st, value, "the host of target #{name} cannot hold @; its agent is #{name}@<host> (C185)"),
+            else: st
+
+        nil ->
+          st
+      end
+
+    Enum.reduce(from_agent -- @aetherion_metrics, st, fn metric, st ->
+      error(
+        st,
+        target_metric(settings, metric),
+        "the aetherion agent measures cpu, mem, disk and net, not #{metric}; give #{metric} a topic (C163), " <>
+          "or read target #{name} with format prometheus or json (C185)"
+      )
+    end)
+  end
+
+  defp target_metric(settings, metric) do
+    Enum.find_value(settings, fn
+      %AST.TargetMetrics{metrics: metrics} -> Enum.find(metrics, &(&1.name == metric))
+      _other -> nil
+    end)
+  end
+
+  # With format = aetherion the main server reaches every agent by its node name
+  # (C185), so the settings of an agent over HTTP have no meaning, and no agent
+  # may have the node name of a worker (C181).
+  defp aetherion_monitoring(nil, st), do: st
+  defp aetherion_monitoring(_config, %{agent_format: format} = st) when format != "aetherion", do: st
+
+  defp aetherion_monitoring(%AST.Config{sections: sections} = config, st) do
+    http_only = %{AST.MonitorPort => "port", AST.MonitorPath => "path", AST.MonitorFields => "fields"}
+
+    st =
+      for %AST.Monitoring{settings: settings} <- sections,
+          %{__struct__: struct} = setting <- settings,
+          Map.has_key?(http_only, struct),
+          reduce: st do
+        st ->
+          error(
+            st,
+            setting,
+            "#{http_only[struct]} is for an agent over HTTP; with format = aetherion each agent is the node <target>@<host> (C185)"
+          )
+      end
+
+    workers =
+      for %AST.Workers{workers: workers} <- sections,
+          %AST.Worker{name: name, settings: [%AST.Host{value: %AST.StringLiteral{value: host}} | _]} <-
+            workers,
+          into: MapSet.new(),
+          do: "#{name}@#{host}"
+
+    for %AST.SutTarget{name: name, settings: settings} = target <- sut_targets(config),
+        node = aetherion_node(name, settings),
+        MapSet.member?(workers, node),
+        reduce: st do
+      st ->
+        error(
+          st,
+          target,
+          "target #{name} and the worker #{name} are both the node #{node}; rename one, an agent and a worker are separate nodes (C181, C185)"
+        )
+    end
+  end
+
+  @doc """
+  The node of the aetherion agent of a target, `name@host`, or nil when none of its
+  metrics comes from an agent (C185). The host is host, or the host of baseUrl.
+  """
+  def aetherion_node(name, settings) do
+    listed = for %AST.TargetMetrics{metrics: metrics} <- settings, metric <- metrics, do: metric.name
+    topics = for %AST.TargetTopics{topics: topics} <- settings, topic <- topics, do: topic.metric
+
+    host =
+      Enum.find_value(settings, fn
+        %AST.Host{value: %AST.StringLiteral{value: host}} -> host
+        _other -> nil
+      end) ||
+        Enum.find_value(settings, fn
+          %AST.BaseUrl{value: %AST.StringLiteral{value: url}} -> URI.parse(url).host
+          _other -> nil
+        end)
+
+    if listed -- topics != [] and host, do: "#{name}@#{host}"
   end
 
   # ---------- Suite ----------
@@ -860,6 +978,7 @@ defmodule PerfLang.Analyzer do
   defp expr(%AST.EnergyLiteral{} = node, _e, _c, st), do: {%{node | type: :energy}, st}
   defp expr(%AST.PowerLiteral{} = node, _e, _c, st), do: {%{node | type: :power}, st}
   defp expr(%AST.CarbonLiteral{} = node, _e, _c, st), do: {%{node | type: :carbon}, st}
+  defp expr(%AST.DataRateLiteral{} = node, _e, _c, st), do: {%{node | type: :data_rate}, st}
   defp expr(%AST.UsersLiteral{} = node, _e, _c, st), do: {%{node | type: :users}, st}
   defp expr(%AST.PercentageLiteral{} = node, _e, _c, st), do: {%{node | type: :percentage}, st}
   defp expr(%AST.StringLiteral{} = node, _e, _c, st), do: {%{node | type: :string}, st}

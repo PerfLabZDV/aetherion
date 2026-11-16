@@ -33,12 +33,28 @@ TestSuite MixedWorkload {
       // The nginx front end of socialNetwork.
       socialNetwork { baseUrl = "http://192.168.178.91:8080"; }
 
-      // The machines measured by Tasmota smart plugs. Each is a target of
-      // its own whose only metric comes over MQTT, so it needs no baseUrl or
-      // host (C156, C163).
-      sutServer1 { metrics = [power]; topics { power = "tele/tasmota_64E19E/SENSOR"; } }
-      sutServer2 { metrics = [power]; topics { power = "tele/tasmota_64FA5B/SENSOR"; } }
-      sutServer3 { metrics = [power]; topics { power = "tele/tasmota_658675/SENSOR"; } }
+      // The machines of socialNetwork, each a target of its own (C156). The
+      // aetherion agent on each measures cpu, mem, disk and net; it runs there
+      // as `aetherion agent --name sutServer1@192.168.178.91`, the target name
+      // and its host (C185). power comes from the Tasmota smart plug of the
+      // machine over MQTT (C163); check that each plug is on the machine of
+      // its target. net leaves out loopback and the virtual interfaces of
+      // Docker, which would count the traffic between containers again (C186).
+      sutServer1 {
+        host    = "192.168.178.91";
+        metrics = [cpu, mem, disk, net, power];
+        topics { power = "tele/tasmota_64E19E/SENSOR"; }
+      }
+      sutServer2 {
+        host    = "192.168.178.92";
+        metrics = [cpu, mem, disk, net, power];
+        topics { power = "tele/tasmota_64FA5B/SENSOR"; }
+      }
+      sutServer3 {
+        host    = "192.168.178.93";
+        metrics = [cpu, mem, disk, net, power];
+        topics { power = "tele/tasmota_658675/SENSOR"; }
+      }
 
       // The machine that runs aetherion. Listing power here adds it to
       // energy.total() and power.mean(), which sum every target with power;
@@ -48,6 +64,11 @@ TestSuite MixedWorkload {
     }
 
     monitoring {
+      // The aetherion agents sample every second, on their own clocks, and the
+      // main server takes their samples; no node_exporter (C185).
+      interval = 1s;
+      format   = aetherion;
+
       // Tasmota publishes {"Time": ..., "ENERGY": {"Power": <watts>, ...}}
       // on tele/<device>/SENSOR, once per TelePeriod (300s by default; set
       // it lower on the plugs, e.g. TelePeriod 10). Every message is a
@@ -66,7 +87,7 @@ TestSuite MixedWorkload {
         file   = "results/mixed_workload_requests.jsonl";
         fields = [time, method, url, status, latency, outcome];
       }
-      // Every power sample with its time and target (C173).
+      // Every cpu, mem, disk, net and power sample with its time and target (C173).
       samples { file = "results/mixed_workload_samples.jsonl"; }
       summary = "results/mixed_workload_summary.json";
     }

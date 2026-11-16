@@ -39,7 +39,7 @@ defmodule Aetherion.Source do
   def measured(%AST.Metric{} = node), do: [node]
 
   def measured(%AST.Call{callee: %AST.Member{object: %AST.Member{name: name}}} = node)
-      when name in ["cpu", "mem", "disk", "gpu", "power"],
+      when name in ["cpu", "mem", "disk", "net", "gpu", "power"],
       do: [node]
 
   def measured(%{__struct__: _} = node) do

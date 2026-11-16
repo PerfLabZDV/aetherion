@@ -102,6 +102,29 @@ defmodule Aetherion do
         do: "#{name}@#{host}"
   end
 
+  @doc """
+  The node names of the aetherion agents of the suite's merged Config, name@host:
+  with `format = aetherion`, one for every target with metrics from an agent (C185).
+  """
+  def agents(%AST.TestSuite{config: nil}), do: []
+
+  def agents(%AST.TestSuite{config: %AST.Config{sections: sections}}) do
+    formats =
+      for %AST.Monitoring{settings: settings} <- sections,
+          %AST.MonitorFormat{value: format} <- settings,
+          do: format
+
+    if formats == ["aetherion"] do
+      for %AST.Sut{targets: targets} <- sections,
+          %AST.SutTarget{name: name, settings: settings} <- targets,
+          node = PerfLang.Analyzer.aetherion_node(name, settings),
+          node != nil,
+          do: node
+    else
+      []
+    end
+  end
+
   @doc "The seed of a run (C179): the seed itself for run 1, so one run replays alone with its own seed."
   def run_seed(seed, 1), do: seed
   def run_seed(seed, run), do: :erlang.phash2({seed, run}, 2_147_483_646) + 1

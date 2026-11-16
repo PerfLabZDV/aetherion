@@ -5,7 +5,8 @@ defmodule Aetherion.Values do
   Numbers, strings, booleans, lists and JSON are plain Elixir terms; JSON null
   is `nil`. Unit values are tagged, in one base unit each: `{:time, ms}`,
   `{:energy, joules}`, `{:power, watts}`, `{:carbon, grams}`,
-  `{:percentage, percent}`, `{:users, count}`. A target is `{:target, name}`.
+  `{:data_rate, bytes_per_second}`, `{:percentage, percent}`, `{:users, count}`.
+  A target is `{:target, name}`.
 
   Operators return `{:ok, value}`, or `:error` when the values do not fit,
   which the interpreter turns into a failed assert with no value (C141, C171).
@@ -13,12 +14,13 @@ defmodule Aetherion.Values do
 
   alias PerfLang.AST
 
-  @units [:time, :energy, :power, :carbon]
+  @units [:time, :energy, :power, :carbon, :data_rate]
   @ordered @units ++ [:percentage, :users]
 
   @energy %{mJ: 0.001, J: 1, kJ: 1.0e3, MJ: 1.0e6, Wh: 3600, kWh: 3.6e6, MWh: 3.6e9}
   @power %{mW: 0.001, W: 1, kW: 1000}
   @carbon %{mgCO2e: 0.001, gCO2e: 1, kgCO2e: 1000}
+  @data_rate %{"B/s": 1, "kB/s": 1.0e3, "MB/s": 1.0e6, "GB/s": 1.0e9}
   @milliseconds %{h: 3_600_000, m: 60_000, s: 1000, ms: 1}
 
   @doc "The value of a literal node."
@@ -29,6 +31,7 @@ defmodule Aetherion.Values do
   def literal(%AST.EnergyLiteral{value: value, unit: unit}), do: {:energy, value * @energy[unit]}
   def literal(%AST.PowerLiteral{value: value, unit: unit}), do: {:power, value * @power[unit]}
   def literal(%AST.CarbonLiteral{value: value, unit: unit}), do: {:carbon, value * @carbon[unit]}
+  def literal(%AST.DataRateLiteral{value: value, unit: unit}), do: {:data_rate, value * @data_rate[unit]}
   def literal(%AST.PercentageLiteral{hundredths: hundredths}), do: {:percentage, hundredths / 100}
   def literal(%AST.UsersLiteral{value: value}), do: {:users, value}
 
@@ -103,7 +106,15 @@ defmodule Aetherion.Values do
 
   # ---------- Text (C177) ----------
 
-  @suffix %{time: "ms", energy: "J", power: "W", carbon: "gCO2e", percentage: "%", users: "vu"}
+  @suffix %{
+    time: "ms",
+    energy: "J",
+    power: "W",
+    carbon: "gCO2e",
+    data_rate: "B/s",
+    percentage: "%",
+    users: "vu"
+  }
 
   @doc """
   The text of a value, for toString() (C177). A Float keeps its decimal point, a unit value
@@ -136,6 +147,7 @@ defmodule Aetherion.Values do
   def show({:energy, joules}), do: "#{round_to(joules)}J"
   def show({:power, watts}), do: "#{round_to(watts)}W"
   def show({:carbon, grams}), do: "#{round_to(grams)}gCO2e"
+  def show({:data_rate, bytes}), do: "#{round_to(bytes)}B/s"
   def show({:percentage, percent}), do: "#{round_to(percent)}%"
   def show({:users, count}), do: "#{count}vu"
   def show({:target, name}), do: name

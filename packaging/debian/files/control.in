@@ -13,4 +13,6 @@ Description: performance tests in PerfLang, on one machine or on workers
  .
  The aetherion command runs a suite on this machine, or on workers: other
  servers with this package whose aetherion-worker service runs the virtual
- users for it. The package holds its own Erlang runtime.
+ users for it. On the machines under test, the aetherion-agent service
+ measures cpu, memory, disk and network for it. The package holds its own
+ Erlang runtime.

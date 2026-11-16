@@ -62,7 +62,7 @@ metric latency_metric latency_measurement throughput_metric
 errors_metric errors_measurement energy_metric energy_measurement
 power_metric power_measurement carbon_metric carbon_measurement
 asserts_metric asserts_measurement checks_metric checks_measurement
-literal time_literal energy_literal power_literal carbon_literal
+literal time_literal energy_literal power_literal carbon_literal data_rate_literal
 users_literal iterations_literal percentage_literal number_literal string_literal
 quoted_string bool_literal integer
 statements statement let_statement assignment_statement
@@ -84,7 +84,7 @@ Terminals
 'retry' 'stopIf' 'attempts' 'delay' 'backoff' 'fixed' 'linear' 'exponential'
 'p50' 'p90' 'p95' 'p99' 'mean' 'min' 'max' 'percentile' 'perSecond'
 'rate' 'count' 'timeouts' 'connectionErrors' 'assertFailures' 'checkFailures' 'total' 'perRequest' 'perUser' 'peak' 'failed'
-identifier time_lit energy_lit power_lit carbon_lit carbon_intensity_lit users_lit iterations_lit
+identifier time_lit energy_lit power_lit carbon_lit carbon_intensity_lit data_rate_lit users_lit iterations_lit
 percentage_lit int_lit float_lit string_lit raw_string_lit
 '{' '}' '(' ')' '[' ']' ',' ';' ':' '.' '=' '=>' '->' '\\' '_'
 '||' '&&' '>=' '<=' '>' '<' '==' '!=' '!' '+' '-' '*' '/' '^'.
@@ -670,6 +670,7 @@ literal -> time_literal       : '$1'.
 literal -> energy_literal     : '$1'.
 literal -> power_literal      : '$1'.
 literal -> carbon_literal     : '$1'.
+literal -> data_rate_literal  : '$1'.
 literal -> users_literal      : '$1'.
 literal -> percentage_literal : '$1'.
 literal -> number_literal     : '$1'.
@@ -680,6 +681,7 @@ time_literal       -> time_lit       : lit(time, '$1').
 energy_literal     -> energy_lit     : lit(energy, '$1').
 power_literal      -> power_lit      : lit(power, '$1').
 carbon_literal     -> carbon_lit     : lit(carbon, '$1').
+data_rate_literal  -> data_rate_lit  : lit(data_rate, '$1').
 users_literal      -> users_lit      : lit(users, '$1').
 iterations_literal -> iterations_lit : lit(iterations, '$1').
 percentage_literal -> percentage_lit : lit(percentage, '$1').

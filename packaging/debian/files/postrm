@@ -3,6 +3,7 @@ set -e
 
 if [ "$1" = purge ]; then
   rm -f /etc/systemd/system/multi-user.target.wants/aetherion-worker.service
+  rm -f /etc/systemd/system/multi-user.target.wants/aetherion-agent.service
   rm -rf /var/lib/aetherion
 fi
 

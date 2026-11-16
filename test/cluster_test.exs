@@ -482,7 +482,186 @@ defmodule Aetherion.ClusterTest do
     end
   end
 
+  describe "monitoring agents (C185)" do
+    # An agent named like a target, so the target's node is name@127.0.0.1.
+    defp agent(name \\ nil) do
+      paths = Enum.flat_map(:code.get_path(), &[~c"-pa", &1])
+
+      {:ok, peer, node} =
+        :peer.start(%{
+          name: name || :"agent#{System.unique_integer([:positive])}",
+          host: ~c"127.0.0.1",
+          longnames: true,
+          args: [~c"-setcookie", String.to_charlist(@cookie) | paths]
+        })
+
+      :ok = :erpc.call(node, Aetherion.Agent, :prepare, [])
+
+      on_exit(fn ->
+        try do
+          :peer.stop(peer)
+        catch
+          _kind, _reason -> :ok
+        end
+      end)
+
+      {peer, node}
+    end
+
+    defp measured(server, name, parts) do
+      """
+      TestSuite S {
+        Config {
+          sut {
+            api { baseUrl = "#{server.url}"; }
+            #{name} { host = "127.0.0.1"; metrics = [#{parts[:metrics] || ~s|cpu, mem, disk, net["lo"]|}]; }
+          }
+          monitoring { interval = 50ms; format = aetherion; }
+          #{parts[:output]}
+        }
+        Test T {
+          Load { #{parts[:load] || "thinkTime 20ms; stages [ 1vu for 800ms ]"} }
+          Actions { sut.api.http.get("/"); }
+          Verify { #{parts[:verify]} }
+        }
+      }
+      """
+    end
+
+    defp sample_lines(file),
+      do: file |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&JSON.decode!/1)
+
+    test "an agent measures its machine, and its samples are on the main server's clock" do
+      server = server(fn _ -> 200 end)
+      samples = temp("agent_samples.jsonl")
+      {_peer, node} = agent()
+      name = name_of(node)
+
+      # Each VM has its own monotonic clock, so without the offset no sample would fall in the window.
+      source =
+        measured(server, name,
+          output: ~s|output { samples { file = "#{samples}"; } }|,
+          verify: """
+          assert sut.#{name}.cpu.max() <= 100%;
+          assert sut.#{name}.mem.max() > 0%;
+          assert sut.#{name}.net.mean() >= 0B/s;
+          assert sut.mem.mean() > 0%;
+          """
+        )
+
+      result = run(source, [])
+      test = hd(hd(result.runs).tests)
+      assert result.exit_code == 0, inspect(test.verify)
+
+      assert [%{name: ^name, readings: readings}] = test.targets
+      assert readings["mem"].samples >= 8
+      assert readings["cpu"].samples >= 8
+
+      lines = Enum.filter(sample_lines(samples), &(&1["target"] == name))
+      assert lines |> Enum.map(& &1["metric"]) |> Enum.uniq() |> Enum.sort() == ["cpu", "disk", "mem", "net"]
+      assert "Actions" in Enum.map(lines, & &1["phase"])
+    end
+
+    test "an agent that cannot be reached, or a node that is no agent, ends the run with exit code 2" do
+      server = server(fn _ -> 200 end)
+
+      result = run(measured(server, "nobody", metrics: "mem"), [])
+      assert result.exit_code == 2
+      assert hd(result.runs).message =~ "cannot reach the agent nobody@127.0.0.1"
+
+      {_peer, node} = worker()
+      result = run(measured(server, name_of(node), metrics: "mem"), [])
+      assert result.exit_code == 2
+      assert hd(result.runs).message =~ "is not an Aetherion agent"
+    end
+
+    test "a lost agent is reached again, and its samples go on" do
+      server = server(fn _ -> 200 end)
+      samples = temp("lost_samples.jsonl")
+      name = :"agent#{System.unique_integer([:positive])}"
+      {peer, _node} = agent(name)
+
+      source =
+        measured(server, name,
+          metrics: "mem",
+          output: ~s|output { samples { file = "#{samples}"; } }|,
+          load: "thinkTime 20ms; stages [ 1vu for 3s ]",
+          verify: "assert sut.#{name}.mem.max() > 0%;"
+        )
+
+      task = Task.async(fn -> run(source, []) end)
+      Process.sleep(800)
+      :peer.stop(peer)
+      stopped = DateTime.utc_now()
+      Process.sleep(500)
+      agent(name)
+      restarted = DateTime.utc_now()
+
+      result = Task.await(task, 20_000)
+      assert result.exit_code == 0
+
+      times =
+        for line <- sample_lines(samples), line["target"] == Atom.to_string(name) do
+          {:ok, time, 0} = DateTime.from_iso8601(line["time"])
+          time
+        end
+
+      assert Enum.any?(times, &(DateTime.compare(&1, stopped) == :lt))
+      assert Enum.any?(times, &(DateTime.compare(&1, restarted) == :gt))
+
+      refute Enum.any?(
+               times,
+               &(DateTime.compare(&1, stopped) == :gt and DateTime.compare(&1, restarted) == :lt)
+             )
+    end
+
+    test "the command line connects to the agents before the run, and explains one it cannot reach" do
+      server = server(fn _ -> 200 end)
+      {_peer, node} = agent()
+      name = name_of(node)
+      System.put_env("AETHERION_COOKIE", @cookie)
+      on_exit(fn -> System.delete_env("AETHERION_COOKIE") end)
+
+      body = [metrics: "mem", load: "stages [ 1vu for 300ms ]"]
+      reachable = temp("agent.perf")
+      File.write!(reachable, measured(server, name, body ++ [verify: "assert sut.#{name}.mem.max() > 0%;"]))
+      unreachable = temp("no_agent.perf")
+      File.write!(unreachable, measured(server, "nobody", body))
+
+      ExUnit.CaptureIO.capture_io(fn -> send(self(), {:exit, Aetherion.CLI.main(["run", reachable])}) end)
+      assert_received {:exit, 0}
+
+      output =
+        ExUnit.CaptureIO.capture_io(:stderr, fn ->
+          send(self(), {:exit, Aetherion.CLI.main(["run", unreachable])})
+        end)
+
+      assert_received {:exit, 2}
+      assert output =~ "cannot reach the agent nobody@127.0.0.1: is `aetherion agent` running there"
+
+      output =
+        ExUnit.CaptureIO.capture_io(:stderr, fn -> send(self(), {:exit, Aetherion.CLI.main(["agent"])}) end)
+
+      assert_received {:exit, 2}
+      assert output =~ "aetherion agent --name name@host"
+    end
+  end
+
   describe "connect/2" do
+    test "connects to agents, and explains a node that is no agent (C185)" do
+      {_peer, node} = agent()
+      assert {:ok, []} = Cluster.connect([], agents: [Atom.to_string(node)], cookie: @cookie)
+
+      {_peer, worker} = worker()
+      assert {:error, message} = Cluster.connect([], agents: [Atom.to_string(worker)], cookie: @cookie)
+      assert message =~ "is not an Aetherion agent; start it with `aetherion agent --name #{worker}`"
+
+      assert {:error, message} =
+               Cluster.connect([Atom.to_string(worker)], agents: [Atom.to_string(worker)], cookie: @cookie)
+
+      assert message =~ "listed twice"
+    end
+
     test "explains a worker it cannot reach, a node that is no worker, and a bad name" do
       assert {:error, message} = Cluster.connect(["nobody@127.0.0.1"], cookie: @cookie)
       assert message =~ "cannot reach the worker nobody@127.0.0.1"

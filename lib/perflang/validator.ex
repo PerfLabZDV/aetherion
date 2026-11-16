@@ -161,7 +161,7 @@ defmodule PerfLang.Validator do
 
   # sut.cpu reads all targets (C109), and sut.any picks one (C168), so these
   # are not target names.
-  @machine_metrics ~w(cpu mem disk gpu power)
+  @machine_metrics ~w(cpu mem disk net gpu power)
 
   defp check(%AST.Config{sections: sections}, _ctx) do
     duplicates(sections, &@config_sections[&1.__struct__], fn name, first ->
@@ -255,9 +255,12 @@ defmodule PerfLang.Validator do
   defp check(%AST.MetricSource{name: name, devices: [_ | _] = devices}, _ctx) when name in ["mem", "power"],
     do: [error(hd(devices), "#{name} takes no device selector (C159)")]
 
-  defp check(%AST.MetricSource{name: "disk", devices: devices}, _ctx) do
+  # disk by device name (C159), net by interface name (C186).
+  defp check(%AST.MetricSource{name: name, devices: devices}, _ctx) when name in ["disk", "net"] do
+    {example, rule} = if name == "disk", do: {~s|disk["nvme0n1"]|, "C159"}, else: {~s|net["eth0"]|, "C186"}
+
     for %AST.NumberLiteral{} = device <- devices do
-      error(device, "disk selects devices by name, e.g. disk[\"nvme0n1\"], not #{device.raw} (C159)")
+      error(device, "#{name} selects devices by name, e.g. #{example}, not #{device.raw} (#{rule})")
     end
   end
 
@@ -364,8 +367,9 @@ defmodule PerfLang.Validator do
       else: [error(value, "path #{inspect(path)} must start with \"/\" (C158)")]
   end
 
-  defp check(%AST.MonitorFormat{value: format} = node, _ctx) when format not in ["prometheus", "json"],
-    do: [error(node, "unknown format #{format}; use prometheus or json (C158)")]
+  defp check(%AST.MonitorFormat{value: format} = node, _ctx)
+       when format not in ["prometheus", "json", "aetherion"],
+       do: [error(node, "unknown format #{format}; use prometheus, json or aetherion (C158, C185)")]
 
   defp check(%AST.CarbonIntensity{value: %AST.CarbonIntensityLiteral{value: amount, raw: raw} = value}, _ctx)
        when amount == 0,
@@ -803,6 +807,7 @@ defmodule PerfLang.Validator do
     AST.EnergyLiteral,
     AST.PowerLiteral,
     AST.CarbonLiteral,
+    AST.DataRateLiteral,
     AST.UsersLiteral,
     AST.PercentageLiteral
   ]

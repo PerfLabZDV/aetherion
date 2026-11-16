@@ -25,6 +25,8 @@ files=/build/packaging/debian/files
 install -D -m 0755 "$files/aetherion" /stage/usr/bin/aetherion
 install -D -m 0644 "$files/aetherion-worker.service" /stage/usr/lib/systemd/system/aetherion-worker.service
 install -D -m 0640 "$files/worker.env" /stage/etc/aetherion/worker.env
+install -D -m 0644 "$files/aetherion-agent.service" /stage/usr/lib/systemd/system/aetherion-agent.service
+install -D -m 0640 "$files/agent.env" /stage/etc/aetherion/agent.env
 install -D -m 0644 "$files/README.Debian" /stage/usr/share/doc/aetherion/README.Debian
 install -D -m 0644 LICENSE /stage/usr/share/doc/aetherion/copyright
 install -d /stage/DEBIAN

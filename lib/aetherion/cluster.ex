@@ -31,38 +31,43 @@ defmodule Aetherion.Cluster do
 
   @doc """
   Starts this node and connects to `workers`, a list of node names such as
-  `"worker1@10.0.0.11"`. Options: `:name`, this node's name, by default
-  `aetherion-<os pid>@<the address that reaches the first worker>`; `:cookie`, by
-  default `$AETHERION_COOKIE`. Every worker must run the same code as this node.
+  `"worker1@10.0.0.11"`, and to the monitoring agents in the option `:agents`
+  (C185). Returns `{:ok, worker_nodes}`. Other options: `:name`, this node's
+  name, by default `aetherion-<os pid>@<the address that reaches the first
+  node>`; `:cookie`, by default `$AETHERION_COOKIE`. Every worker and agent must
+  run the same code as this node.
   """
   def connect(workers, opts \\ []) do
-    with {:ok, nodes} <- parse(workers),
+    with {:ok, nodes} <- parse(workers, opts[:agents] || []),
          {:ok, cookie} <- cookie(opts[:cookie]),
-         :ok <- start_self(opts[:name], hd(nodes), cookie) do
-      Enum.reduce_while(nodes, {:ok, []}, fn node, {:ok, connected} ->
-        case reach(node) do
-          :ok -> {:cont, {:ok, connected ++ [node]}}
+         :ok <- start_self(opts[:name], elem(hd(nodes), 1), cookie) do
+      Enum.reduce_while(nodes, {:ok, []}, fn {role, node}, {:ok, connected} ->
+        case reach(node, role) do
+          :ok when role == :worker -> {:cont, {:ok, connected ++ [node]}}
+          :ok -> {:cont, {:ok, connected}}
           {:error, message} -> {:halt, {:error, message}}
         end
       end)
     end
   end
 
-  defp parse(workers) do
-    nodes = for name <- workers, name = String.trim(name), name != "", do: name
+  defp parse(workers, agents) do
+    names = fn list -> for name <- list, name = String.trim(name), name != "", do: name end
+    nodes = Enum.map(names.(workers), &{:worker, &1}) ++ Enum.map(names.(agents), &{:agent, &1})
+    all = Enum.map(nodes, &elem(&1, 1))
 
     cond do
       nodes == [] ->
         {:error, "--workers needs at least one worker, such as worker1@10.0.0.11"}
 
-      bad = Enum.find(nodes, &(not String.match?(&1, ~r/^[^@\s]+@[^@\s]+$/))) ->
+      bad = Enum.find(all, &(not String.match?(&1, ~r/^[^@\s]+@[^@\s]+$/))) ->
         {:error, "#{bad} is not a node name; write it as name@host, such as worker1@10.0.0.11"}
 
-      length(Enum.uniq(nodes)) < length(nodes) ->
-        {:error, "a worker is listed twice in --workers"}
+      length(Enum.uniq(all)) < length(all) ->
+        {:error, "a node is listed twice among the workers and agents"}
 
       true ->
-        {:ok, Enum.map(nodes, &String.to_atom/1)}
+        {:ok, for({role, name} <- nodes, do: {role, String.to_atom(name)})}
     end
   end
 
@@ -147,26 +152,35 @@ defmodule Aetherion.Cluster do
     :ok
   end
 
-  defp reach(node) do
+  @doc """
+  Connects to `node` and checks that it is ready as a `:worker` or an `:agent`
+  (C185) and runs the code of this node: `:ok` or `{:error, message}`.
+  """
+  def reach(node, role) do
+    command = if role == :worker, do: "aetherion worker", else: "aetherion agent"
+
     cond do
       not Node.connect(node) ->
         {:error,
-         "cannot reach the worker #{node}: is `aetherion worker` running there, with the same cookie, " <>
+         "cannot reach the #{role} #{node}: is `#{command}` running there, with the same cookie, " <>
            "and are ports 4369 and the distribution ports open?"}
 
-      not worker?(node) ->
-        {:error, "#{node} is not an Aetherion worker; start it with `aetherion worker --name #{node}`"}
+      not ready?(node, role) ->
+        {:error, "#{node} is not an Aetherion #{role}; start it with `#{command} --name #{node}`"}
 
       :erpc.call(node, __MODULE__, :fingerprint, []) != fingerprint() ->
-        {:error, "the worker #{node} runs different code; deploy the same version on every server"}
+        {:error, "the #{role} #{node} runs different code; deploy the same version on every server"}
 
       true ->
         :ok
     end
   end
 
-  defp worker?(node) do
-    :erpc.call(node, Aetherion.Worker, :ready?, [])
+  defp ready?(node, :worker), do: remote_ready?(node, Aetherion.Worker)
+  defp ready?(node, :agent), do: remote_ready?(node, Aetherion.Agent)
+
+  defp remote_ready?(node, module) do
+    :erpc.call(node, module, :ready?, [])
   rescue
     _error -> false
   end
@@ -221,9 +235,11 @@ defmodule Aetherion.Cluster do
     %{sessions: sessions, stage: 0, counting: false}
   end
 
-  # How far this node's monotonic clock is ahead of the worker's, in milliseconds,
-  # from the shortest of a few round trips: the worker read its clock about halfway.
-  defp offset(node) do
+  @doc """
+  How far this node's monotonic clock is ahead of the one of `node`, in milliseconds,
+  from the shortest of a few round trips: `node` read its clock about halfway.
+  """
+  def offset(node) do
     1..5
     |> Enum.map(fn _n ->
       sent = Recorder.now()
