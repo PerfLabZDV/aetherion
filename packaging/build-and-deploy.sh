@@ -1,8 +1,10 @@
 #!/bin/sh
-# Builds the Debian 13 package and deploys it to the servers of packaging/ansible/inventory.yml.
+# Builds the Debian 13 package and deploys it to the servers of packaging/ansible/inventory.yml:
+# the main servers, the workers and the monitoring agents on the machines under test.
 #
 #   packaging/build-and-deploy.sh                       # build, then deploy to every server
 #   packaging/build-and-deploy.sh --limit euWorker1     # arguments go to ansible-playbook
+#   packaging/build-and-deploy.sh --limit aetherion_agents   # only the agents (C185)
 #   packaging/build-and-deploy.sh --check --diff        # what a deployment would change
 #   packaging/build-and-deploy.sh --ask-become-pass     # when sudo on the servers asks for a password
 #   RUN_TESTS=1 packaging/build-and-deploy.sh           # run the tests in the build first
